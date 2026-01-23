@@ -4,7 +4,7 @@
 
 ### Development steps (short)
 
-1. Requirement analysis — gather stakeholder needs.
+1. Requirement analysis — gather stakeholder needs. hello
 2. System design — diagrams and DB schema.
 3. Implementation — build in sprints (auth, students, subjects, grades, locks, export).
 4. Testing & acceptance — unit, integration, and UAT.
