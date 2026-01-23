@@ -1,0 +1,4598 @@
+<?php
+session_start();
+if (!isset($_SESSION['user'])) {
+    header("Location: ../login.php");
+    exit();
+}
+// --- SF10 dynamic data fetcher ---
+require_once dirname(__DIR__, 1) . '/includes/db.php';
+
+$student = null;
+$grade1_school = null;
+$grade2_school = null;
+$grade3_school = null;
+$grade4_school = null;
+$grade5_school = null;
+$grade6_school = null;
+if (isset($_GET['student_id'])) {
+   $student_id = intval($_GET['student_id']);
+   $stmt = $conn->prepare('SELECT * FROM students WHERE id = ? LIMIT 1');
+   $stmt->bind_param('i', $student_id);
+   $stmt->execute();
+   $result = $stmt->get_result();
+   $student = $result->fetch_assoc();
+
+   // Helper function for fetching school record for a grade
+   function fetch_grade_school($conn, $student_id, $grade_label, $grade_num) {
+      $stmt = $conn->prepare('SELECT * FROM schools_attended WHERE student_id = ? AND (grade_level = ? OR grade_level = ?) ORDER BY id ASC LIMIT 1');
+      $stmt->bind_param('iss', $student_id, $grade_label, $grade_num);
+      $stmt->execute();
+      $result = $stmt->get_result();
+      return $result->fetch_assoc();
+   }
+
+   $grade1_school = fetch_grade_school($conn, $student_id, 'Grade 1', '1');
+   $grade2_school = fetch_grade_school($conn, $student_id, 'Grade 2', '2');
+   $grade3_school = fetch_grade_school($conn, $student_id, 'Grade 3', '3');
+   $grade4_school = fetch_grade_school($conn, $student_id, 'Grade 4', '4');
+   $grade5_school = fetch_grade_school($conn, $student_id, 'Grade 5', '5');
+   $grade6_school = fetch_grade_school($conn, $student_id, 'Grade 6', '6');
+
+// Function to get subject name for a specific student, matching preview logic
+function getSubjectNameForStudent($conn, $subject_id, $student_id, $school_attended_id) {
+    // First, determine if this is a transfer student
+    $is_transfer = false;
+    $grade_level = null;
+    
+    $school_info = $conn->query("SELECT grade_level, adviser_name FROM schools_attended WHERE id = $school_attended_id");
+    if ($school_info && $school_info->num_rows > 0) {
+        $school_data = $school_info->fetch_assoc();
+        $grade_level = $school_data['grade_level'];
+        
+        // Auto-detect transfer status based on adviser existence in users table
+        if (!empty($school_data['adviser_name'])) {
+            $adviser_check = $conn->query("SELECT id FROM users WHERE full_name = '" . $conn->real_escape_string($school_data['adviser_name']) . "'")->num_rows;
+            $is_transfer = ($adviser_check == 0); // Transfer if adviser not in system
+        } else {
+            $is_transfer = true; // No adviser = transfer student
+        }
+    }
+    
+    // First check if there's a custom subject name for this transfer student
+    $table_check = $conn->query("SHOW TABLES LIKE 'student_custom_subjects'");
+    if ($table_check && $table_check->num_rows > 0) {
+        $custom_query = $conn->query("SELECT custom_subject_name 
+                                      FROM student_custom_subjects 
+                                      WHERE student_id = $student_id 
+                                      AND school_attended_id = $school_attended_id 
+                                      AND subject_id = $subject_id");
+        if ($custom_query && $custom_query->num_rows > 0) {
+            $custom_result = $custom_query->fetch_assoc();
+            return $custom_result['custom_subject_name'];
+        }
+    }
+    
+    // IMPORTANT: Only use grade-level config for regular students (non-transfer)
+    // Transfer students should NOT be affected by global subject format changes
+    if (!$is_transfer && $grade_level) {
+        $table_check = $conn->query("SHOW TABLES LIKE 'subject_grade_groups'");
+        
+        if ($table_check && $table_check->num_rows > 0) {
+            $group_query = $conn->query("SELECT subject_name 
+                                         FROM subject_grade_groups 
+                                         WHERE grade_level = '$grade_level' 
+                                         AND subject_id = $subject_id");
+            if ($group_query && $group_query->num_rows > 0) {
+                $group_result = $group_query->fetch_assoc();
+                return $group_result['subject_name'];
+            }
+        }
+    }
+    
+    // Fall back to default subject name
+    $default_query = $conn->query("SELECT subject_name FROM subjects WHERE id = $subject_id");
+    if ($default_query && $default_query->num_rows > 0) {
+        $default_result = $default_query->fetch_assoc();
+        return $default_result['subject_name'];
+    }
+    
+    return 'Unknown Subject';
+}
+}
+?>
+
+<?php
+// Build a robust per-school (grade-level) latest-grade map for this student
+// This fetches the latest row per subject+quarter for every school the student attended
+$grades_by_grade = [];
+if (isset($student_id)) {
+   $stmt_sch = $conn->prepare('SELECT * FROM schools_attended WHERE student_id = ? ORDER BY grade_level ASC, school_year ASC');
+   $stmt_sch->bind_param('i', $student_id);
+   $stmt_sch->execute();
+   $schools_res = $stmt_sch->get_result();
+
+   $latest_query = "SELECT g.*\n                       FROM grades g\n                       INNER JOIN (\n                           SELECT subject_id, quarter, MAX(id) as max_id\n                           FROM grades\n                           WHERE student_id = ?\n                           AND school_attended_id = ?\n                           GROUP BY subject_id, quarter\n                       ) AS latest ON g.id = latest.max_id\n                       ORDER BY g.subject_id, g.quarter";
+
+   while ($school_row = $schools_res->fetch_assoc()) {
+      // Try to extract numeric grade (e.g., 'Grade 1' -> 1), fallback to school id
+      $grade_label = $school_row['grade_level'];
+      preg_match('/(\d+)/', $grade_label, $m);
+      $grade_num = isset($m[1]) ? intval($m[1]) : (int)$school_row['id'];
+
+      $grades_by_grade[$grade_num] = ['school' => $school_row, 'grades' => []];
+
+      $stmt_g = $conn->prepare($latest_query);
+      $stmt_g->bind_param('ii', $student_id, $school_row['id']);
+      $stmt_g->execute();
+      $res_g = $stmt_g->get_result();
+      while ($r = $res_g->fetch_assoc()) {
+         $sid = (int)$r['subject_id'];
+         $q = (int)$r['quarter'];
+         if (!isset($grades_by_grade[$grade_num]['grades'][$sid])) {
+            $grades_by_grade[$grade_num]['grades'][$sid] = ['q1' => '', 'q2' => '', 'q3' => '', 'q4' => '', 'final_rating' => '', 'remarks' => ''];
+         }
+         $grades_by_grade[$grade_num]['grades'][$sid]['q' . $q] = $r['grade'];
+         if (isset($r['final_rating']) && $r['final_rating'] !== '') {
+            $grades_by_grade[$grade_num]['grades'][$sid]['final_rating'] = $r['final_rating'];
+         }
+         if (isset($r['remarks']) && $r['remarks'] !== '') {
+            $grades_by_grade[$grade_num]['grades'][$sid]['remarks'] = $r['remarks'];
+         }
+      }
+      $stmt_g->close();
+   }
+   $stmt_sch->close();
+
+   // Convenience: expose Grade 1..8 arrays if present for backward compatibility
+   for ($i = 1; $i <= 8; $i++) {
+      ${"grades_grade" . $i} = $grades_by_grade[$i]['grades'] ?? [];
+   }
+
+   // Remedial classes fetcher per grade (1..8)
+   // This builds `remedial_grade1` .. `remedial_grade8` arrays mirroring preview logic
+   $remedial_by_grade = [];
+   if (!empty($grades_by_grade)) {
+      foreach ($grades_by_grade as $gnum => $ginfo) {
+         $sy = $ginfo['school']['school_year'] ?? null;
+         $remedial_by_grade[$gnum] = [];
+         if ($sy) {
+            // Prefer school_attended_id scoping if remedial_classes has the column
+            $col_check = $conn->query("SHOW COLUMNS FROM remedial_classes LIKE 'school_attended_id'");
+            $has_school_attended = ($col_check && $col_check->num_rows > 0);
+            if ($has_school_attended) {
+               $stmt_r = $conn->prepare("SELECT * FROM remedial_classes WHERE student_id = ? AND school_attended_id = ? ORDER BY id ASC");
+               $stmt_r->bind_param('ii', $student_id, $ginfo['school']['id']);
+            } else {
+               $stmt_r = $conn->prepare("SELECT * FROM remedial_classes WHERE student_id = ? AND school_year = ? ORDER BY id ASC");
+               $stmt_r->bind_param('is', $student_id, $sy);
+            }
+            $stmt_r->execute();
+            $res_r = $stmt_r->get_result();
+            if ($res_r) {
+               $remedial_by_grade[$gnum] = $res_r->fetch_all(MYSQLI_ASSOC);
+            }
+            $stmt_r->close();
+         }
+      }
+   }
+
+   // Expose as convenience variables `remedial_grade1` .. `remedial_grade8`
+   for ($i = 1; $i <= 8; $i++) {
+      ${"remedial_grade" . $i} = $remedial_by_grade[$i] ?? [];
+   }
+}
+
+   // Helper to format remarks on printable sheet: uppercase PASSED/FAILED, escape otherwise
+   function format_remark_sheet($text) {
+      $text = trim((string)$text);
+      if ($text === '') {
+         return '-';
+      }
+      $upper = strtoupper($text);
+      if ($upper === 'PASSED' || $upper === 'FAILED') {
+         return htmlspecialchars($upper, ENT_QUOTES, 'UTF-8');
+      }
+      return htmlspecialchars($text, ENT_QUOTES, 'UTF-8');
+   }
+
+   // Convert grade label to Roman numeral if it contains a numeric grade
+   function grade_label_to_roman($label) {
+      if (!$label) return '';
+      // Extract first number found
+      if (preg_match('/(\d+)/', $label, $m)) {
+         $num = intval($m[1]);
+         $map = [1000=>'M',900=>'CM',500=>'D',400=>'CD',100=>'C',90=>'XC',50=>'L',40=>'XL',10=>'X',9=>'IX',5=>'V',4=>'IV',1=>'I'];
+         $res = '';
+         foreach ($map as $val => $rom) {
+            while ($num >= $val) { $res .= $rom; $num -= $val; }
+         }
+         return $res;
+      }
+      // If label already contains words like 'Grade I', try to detect roman inside
+      if (preg_match('/\b(I|II|III|IV|V|VI|VII|VIII|IX|X)\b/i', $label, $m2)) {
+         return strtoupper($m2[1]);
+      }
+      return strtoupper(htmlspecialchars($label));
+   }
+?>
+
+<html xmlns:v="urn:schemas-microsoft-com:vml"
+xmlns:o="urn:schemas-microsoft-com:office:office"
+xmlns:x="urn:schemas-microsoft-com:office:excel"
+xmlns="http://www.w3.org/TR/REC-html40">
+
+<head>
+<meta http-equiv=Content-Type content="text/html; charset=windows-1252">
+<meta name=ProgId content=Excel.Sheet>
+<meta name=Generator content="Microsoft Excel 15">
+<link id=Main-File rel=Main-File href="../SF10_official_final.php">
+<link rel=File-List href=filelist.xml>
+<title>School Form 10 ES Learners Permanent Record Final</title>
+<link rel=Stylesheet href=stylesheet.css>
+<style>
+<!--table
+	{mso-displayed-decimal-separator:"\.";
+	mso-displayed-thousand-separator:"\,";}
+@page
+	{margin:0in;
+	mso-header-margin:0in;
+	mso-footer-margin:0in;
+	mso-horizontal-page-align:center;
+    size: 8.5in 13in; /* Long Bond Paper / Legal Size (PH) */}
+@media print {
+    @page {
+        size: 8.5in 13in;
+        margin: 0 !important;
+    }
+    html, body {
+        margin: 0 !important;
+        padding: 0 !important;
+        width: 8.5in !important;
+        height: 13in !important;
+        overflow: hidden !important;
+    }
+    body {
+        background-color: white;
+        display: block !important;
+    }
+    .form-container {
+        box-shadow: none !important;
+        width: 1149px !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        position: absolute;
+        top: 0;
+        left: 0;
+        /* Non-proportional scaling to fit legal size edge-to-edge */
+        transform: scale(0.71, 0.65); 
+        transform-origin: top left;
+        max-height: 19in; 
+    }
+    .no-print {
+        display: none !important;
+        height: 0 !important;
+        visibility: hidden !important;
+    }
+    table {
+        page-break-inside: auto !important;
+        page-break-after: avoid !important;
+        border-collapse: collapse !important;
+    }
+    tr {
+        page-break-inside: avoid !important;
+        page-break-after: auto !important;
+    }
+}
+body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    background-color: #f8f9fa;
+    margin: 0;
+    padding: 20px;
+}
+.form-container {
+    background-color: white;
+    padding: 0;
+    box-shadow: 0 0 10px rgba(0,0,0,0.1);
+}
+-->
+</style>
+<![if !supportTabStrip]><script language="JavaScript">
+<!--
+function fnUpdateTabs()
+ {
+  if (parent.window.g_iIEVer>=4) {
+   if (parent.document.readyState=="complete"
+    && parent.frames['frTabs'].document.readyState=="complete")
+   parent.fnSetActiveSheet(1);
+  else
+   window.setTimeout("fnUpdateTabs();",150);
+ }
+}
+
+if (window.name!="frSheet")
+ window.location.replace("../SF10_official_final.php");
+else
+ fnUpdateTabs();
+//-->
+</script>
+<![endif]>
+</head>
+
+<body link="#0563C1" vlink="#954F72">
+
+<!-- Back to preview card (hidden when printing) -->
+<div class="no-print" style="width: 100%; max-width: 1149px; margin-bottom: 15px; display: flex; gap: 10px;">
+   <div style="display:inline-block; background:#6c757d; color:#fff; border-radius:6px; padding:8px 12px;">
+      <a href="../pages/sf10_preview.php?student_id=<?= isset($student_id) ? intval($student_id) : '' ?>" style="color:inherit; text-decoration:none; font-weight:600;">
+         &larr; Back to Preview
+      </a>
+   </div>
+   <div style="display:inline-block; background:#198754; color:#fff; border-radius:6px; padding:8px 12px; cursor: pointer;" onclick="window.print()">
+      <span style="font-weight:600;">
+         <i class="bi bi-printer"></i> Print Form (Legal Size)
+      </span>
+   </div>
+</div>
+
+<div class="form-container">
+<table border=0 cellpadding=0 cellspacing=0 width=1149 style='border-collapse:
+ collapse;table-layout:fixed;width:869pt'>
+ <col class=xl66 width=7 style='mso-width-source:userset;mso-width-alt:256;
+ width:5pt'>
+ <col class=xl66 width=41 style='mso-width-source:userset;mso-width-alt:1499;
+ width:31pt'>
+ <col class=xl66 width=19 style='mso-width-source:userset;mso-width-alt:694;
+ width:14pt'>
+ <col class=xl66 width=40 style='mso-width-source:userset;mso-width-alt:1462;
+ width:30pt'>
+ <col class=xl66 width=37 style='mso-width-source:userset;mso-width-alt:1353;
+ width:28pt'>
+ <col class=xl66 width=23 style='mso-width-source:userset;mso-width-alt:841;
+ width:17pt'>
+ <col class=xl66 width=21 style='mso-width-source:userset;mso-width-alt:768;
+ width:16pt'>
+ <col class=xl66 width=41 style='mso-width-source:userset;mso-width-alt:1499;
+ width:31pt'>
+ <col class=xl66 width=12 style='mso-width-source:userset;mso-width-alt:438;
+ width:9pt'>
+ <col class=xl66 width=34 style='mso-width-source:userset;mso-width-alt:1243;
+ width:26pt'>
+ <col class=xl66 width=33 style='mso-width-source:userset;mso-width-alt:1206;
+ width:25pt'>
+ <col class=xl66 width=23 style='mso-width-source:userset;mso-width-alt:841;
+ width:17pt'>
+ <col class=xl66 width=16 style='mso-width-source:userset;mso-width-alt:585;
+ width:12pt'>
+ <col class=xl66 width=33 style='mso-width-source:userset;mso-width-alt:1206;
+ width:25pt'>
+ <col class=xl66 width=35 style='mso-width-source:userset;mso-width-alt:1280;
+ width:26pt'>
+ <col class=xl66 width=17 span=2 style='mso-width-source:userset;mso-width-alt:
+ 621;width:13pt'>
+ <col class=xl66 width=28 style='mso-width-source:userset;mso-width-alt:1024;
+ width:21pt'>
+ <col class=xl66 width=33 style='mso-width-source:userset;mso-width-alt:1206;
+ width:25pt'>
+ <col class=xl66 width=56 style='mso-width-source:userset;mso-width-alt:2048;
+ width:42pt'>
+ <col class=xl66 width=13 style='mso-width-source:userset;mso-width-alt:475;
+ width:10pt'>
+ <col class=xl66 width=40 style='mso-width-source:userset;mso-width-alt:1462;
+ width:30pt'>
+ <col class=xl66 width=19 span=2 style='mso-width-source:userset;mso-width-alt:
+ 694;width:14pt'>
+ <col class=xl66 width=58 style='mso-width-source:userset;mso-width-alt:2121;
+ width:44pt'>
+ <col class=xl66 width=21 style='mso-width-source:userset;mso-width-alt:768;
+ width:16pt'>
+ <col class=xl66 width=8 style='mso-width-source:userset;mso-width-alt:292;
+ width:6pt'>
+ <col class=xl66 width=14 style='mso-width-source:userset;mso-width-alt:512;
+ width:11pt'>
+ <col class=xl66 width=31 style='mso-width-source:userset;mso-width-alt:1133;
+ width:23pt'>
+ <col class=xl66 width=10 style='mso-width-source:userset;mso-width-alt:365;
+ width:8pt'>
+ <col class=xl66 width=22 style='mso-width-source:userset;mso-width-alt:804;
+ width:17pt'>
+ <col class=xl66 width=10 style='mso-width-source:userset;mso-width-alt:365;
+ width:8pt'>
+ <col class=xl66 width=2 style='mso-width-source:userset;mso-width-alt:73;
+ width:2pt'>
+ <col class=xl66 width=5 style='mso-width-source:userset;mso-width-alt:182;
+ width:4pt'>
+ <col class=xl66 width=6 style='mso-width-source:userset;mso-width-alt:219;
+ width:5pt'>
+ <col class=xl66 width=23 style='mso-width-source:userset;mso-width-alt:841;
+ width:17pt'>
+ <col class=xl66 width=6 style='mso-width-source:userset;mso-width-alt:219;
+ width:5pt'>
+ <col class=xl66 width=12 style='mso-width-source:userset;mso-width-alt:438;
+ width:9pt'>
+ <col class=xl66 width=26 style='mso-width-source:userset;mso-width-alt:950;
+ width:20pt'>
+ <col class=xl66 width=16 style='mso-width-source:userset;mso-width-alt:585;
+ width:12pt'>
+ <col class=xl66 width=12 span=3 style='mso-width-source:userset;mso-width-alt:
+ 438;width:9pt'>
+ <col class=xl66 width=24 style='mso-width-source:userset;mso-width-alt:877;
+ width:18pt'>
+ <col class=xl66 width=14 style='mso-width-source:userset;mso-width-alt:512;
+ width:11pt'>
+ <col class=xl66 width=17 style='mso-width-source:userset;mso-width-alt:621;
+ width:13pt'>
+ <col class=xl66 width=24 style='mso-width-source:userset;mso-width-alt:877;
+ width:18pt'>
+ <col class=xl66 width=16 style='mso-width-source:userset;mso-width-alt:585;
+ width:12pt'>
+ <col class=xl66 width=33 style='mso-width-source:userset;mso-width-alt:1206;
+ width:25pt'>
+ <col class=xl66 width=52 style='mso-width-source:userset;mso-width-alt:1901;
+ width:39pt'>
+ <col class=xl66 width=6 style='mso-width-source:userset;mso-width-alt:219;
+ width:5pt'>
+ <col class=xl66 width=0 style='display:none'>
+ <col class=xl66 width=0 style='display:none;mso-width-source:userset;
+ mso-width-alt:2340'>
+ <col width=0 span=2 style='display:none'>
+ <tr height=21 style='mso-height-source:userset;height:15.75pt'>
+  <td height=21 class=xl66 width=7 style='height:15.75pt;width:5pt'><a
+  name="Print_Area"></a></td>
+  <td class=xl67 width=41 style='width:31pt'>SF10-ES</span></td>
+  <td class=xl66 width=19 style='width:14pt'></td>
+  <td class=xl66 width=40 style='width:30pt'></td>
+  <td class=xl67 width=37 style='width:28pt'></td>
+  <td class=xl67 width=23 style='width:17pt'></td>
+  <td class=xl67 width=21 style='width:16pt'></td>
+  <td class=xl67 width=41 style='width:31pt'></td>
+  <td class=xl67 width=12 style='width:9pt'></td>
+  <td class=xl67 width=34 style='width:26pt'></td>
+  <td class=xl67 width=33 style='width:25pt'></td>
+  <td class=xl67 width=23 style='width:17pt'></td>
+  <td class=xl69 width=16 style='width:12pt'></td>
+  <td class=xl67 width=33 style='width:25pt'></td>
+  <td class=xl67 width=35 style='width:26pt'></td>
+  <td class=xl67 width=17 style='width:13pt'></td>
+  <td class=xl67 width=17 style='width:13pt'></td>
+  <td class=xl69 width=28 style='width:21pt'></td>
+  <td class=xl66 width=33 style='width:25pt'></td>
+  <td class=xl69 width=56 style='width:42pt'></td>
+  <td class=xl66 width=13 style='width:10pt'></td>
+  <td class=xl75 width=40 style='width:30pt'></td>
+  <td class=xl75 width=19 style='width:14pt'></td>
+  <td class=xl75 width=19 style='width:14pt'></td>
+  <td class=xl75 width=58 style='width:44pt'></td>
+  <td class=xl75 width=21 style='width:16pt'></td>
+  <td class=xl75 width=8 style='width:6pt'></td>
+  <td class=xl75 width=14 style='width:11pt'></td>
+  <td class=xl66 width=31 style='width:23pt'></td>
+  <td class=xl66 width=10 style='width:8pt'></td>
+  <td class=xl75 width=22 style='width:17pt'></td>
+  <td class=xl75 width=10 style='width:8pt'></td>
+  <td class=xl86 width=2 style='width:2pt'></td>
+  <td class=xl86 width=5 style='width:4pt'></td>
+  <td class=xl86 width=6 style='width:5pt'></td>
+  <td class=xl69 width=23 style='width:17pt'></td>
+  <td class=xl69 width=6 style='width:5pt'></td>
+  <td class=xl69 width=12 style='width:9pt'></td>
+  <td class=xl69 width=26 style='width:20pt'></td>
+  <td class=xl69 width=16 style='width:12pt'></td>
+  <td class=xl69 width=12 style='width:9pt'></td>
+  <td class=xl69 width=12 style='width:9pt'></td>
+  <td class=xl69 width=12 style='width:9pt'></td>
+  <td class=xl69 colspan=6 width=128 style='mso-ignore:colspan;width:97pt'>Page
+  2 of ________</td>
+  <td class=xl69 width=52 style='width:39pt'></td>
+  <td class=xl66 width=6 style='width:5pt'></td>
+  <td class=xl66 width=0></td>
+  <td class=xl66 width=0></td>
+  <td width=0></td>
+  <td width=0></td>
+ </tr>
+ <tr height=20 style='mso-height-source:userset;height:15.0pt'>
+  <td height=20 class=xl66 style='height:15.0pt'></td>
+  <td colspan=49 class=xl232 style='border-right:.5pt solid black'>SCHOLASTIC
+  RECORD</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+<?php
+// Compute/locate General Average rows for Grades 5-8 (prefer stored GA rows)
+$ga_skip_ids = [9,10,11,12];
+$ga5_final = null; $ga6_final = null; $ga7_final = null; $ga8_final = null;
+$ga5_row = null; $ga6_row = null; $ga7_row = null; $ga8_row = null;
+if (!empty($grades_grade5) && is_array($grades_grade5)) {
+   $ga5_finals = [];
+   foreach ($grades_grade5 as $sid => $g) {
+      if (in_array(intval($sid), $ga_skip_ids)) continue;
+      if (!empty($g['is_general_average']) || (isset($g['subject_name']) && strtolower(trim($g['subject_name'])) === 'general average')) {
+         $ga5_row = $g;
+      }
+      if (!empty($g['final_rating']) || $g['final_rating'] === '0') $ga5_finals[] = round(floatval($g['final_rating']));
+   }
+   $ga5_final = (!empty($ga5_finals)) ? round(array_sum($ga5_finals)/count($ga5_finals)) : null;
+}
+if (!empty($grades_grade6) && is_array($grades_grade6)) {
+   $ga6_finals = [];
+   foreach ($grades_grade6 as $sid => $g) {
+      if (in_array(intval($sid), $ga_skip_ids)) continue;
+      if (!empty($g['is_general_average']) || (isset($g['subject_name']) && strtolower(trim($g['subject_name'])) === 'general average')) {
+         $ga6_row = $g;
+      }
+      if (!empty($g['final_rating']) || $g['final_rating'] === '0') $ga6_finals[] = round(floatval($g['final_rating']));
+   }
+   $ga6_final = (!empty($ga6_finals)) ? round(array_sum($ga6_finals)/count($ga6_finals)) : null;
+}
+if (!empty($grades_grade7) && is_array($grades_grade7)) {
+   $ga7_finals = [];
+   foreach ($grades_grade7 as $sid => $g) {
+      if (in_array(intval($sid), $ga_skip_ids)) continue;
+      if (!empty($g['is_general_average']) || (isset($g['subject_name']) && strtolower(trim($g['subject_name'])) === 'general average')) {
+         $ga7_row = $g;
+      }
+      if (!empty($g['final_rating']) || $g['final_rating'] === '0') $ga7_finals[] = round(floatval($g['final_rating']));
+   }
+   $ga7_final = (!empty($ga7_finals)) ? round(array_sum($ga7_finals)/count($ga7_finals)) : null;
+}
+if (!empty($grades_grade8) && is_array($grades_grade8)) {
+   $ga8_finals = [];
+   foreach ($grades_grade8 as $sid => $g) {
+      if (in_array(intval($sid), $ga_skip_ids)) continue;
+      if (!empty($g['is_general_average']) || (isset($g['subject_name']) && strtolower(trim($g['subject_name'])) === 'general average')) {
+         $ga8_row = $g;
+      }
+      if (!empty($g['final_rating']) || $g['final_rating'] === '0') $ga8_finals[] = round(floatval($g['final_rating']));
+   }
+   $ga8_final = (!empty($ga8_finals)) ? round(array_sum($ga8_finals)/count($ga8_finals)) : null;
+}
+?>
+ <tr height=4 style='mso-height-source:userset;height:3.0pt'>
+  <td height=4 class=xl66 style='height:3.0pt'></td>
+  <td class=xl66></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl66></td>
+  <td class=xl88></td>
+  <td class=xl88></td>
+  <td class=xl88></td>
+  <td class=xl88></td>
+  <td class=xl88></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl86></td>
+  <td class=xl86></td>
+  <td class=xl86></td>
+  <td class=xl117></td>
+  <td class=xl117></td>
+  <td colspan=13 class=xl117></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <td colspan=2 class=xl235>School:</td>
+  <td colspan=11 class=xl154>
+  <?php
+            if (isset($grade5_school) && !empty($grade5_school['school_name'])) {
+               echo '<strong>' . strtoupper(htmlspecialchars($grade5_school['school_name'])) . '</strong>';
+            } else {
+               echo '&nbsp;';
+            }
+         ?>
+  </td>
+  <td colspan=4 class=xl201>School ID:</td>
+  <td colspan=2 class=xl154 style='border-right:1.0pt solid black'>
+  <?php
+         if (isset($grade5_school) && !empty($grade5_school['school_id'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade5_school['school_id'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td class=xl66></td>
+  <td class=xl89 colspan=2 style='mso-ignore:colspan'>School:</td>
+  <td colspan=20 class=xl154>
+  <?php
+            if (isset($grade6_school) && !empty($grade6_school['school_name'])) {
+               echo '<strong>' . strtoupper(htmlspecialchars($grade6_school['school_name'])) . '</strong>';
+            } else {
+               echo '&nbsp;';
+            }
+         ?>
+  </td>
+  <td colspan=5 class=xl155>School ID:</td>
+  <td colspan=2 class=xl154 style='border-right:1.0pt solid black'>
+  <?php
+         if (isset($grade6_school) && !empty($grade6_school['school_id'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade6_school['school_id'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <td class=xl91 colspan=2 style='mso-ignore:colspan'>District:</td>
+  <td colspan=3 class=xl123>
+  <?php
+            if (isset($grade5_school) && !empty($grade5_school['district'])) {
+               echo '<strong>' . strtoupper(htmlspecialchars($grade5_school['district'])) . '</strong>';
+            } else {
+               echo '&nbsp;';
+            }
+      ?>
+  </td>
+  <td class=xl66 colspan=2 style='mso-ignore:colspan'>Division:</td>
+  <td colspan=9 class=xl94>
+ <?php
+         if (isset($grade5_school) && !empty($grade5_school['division'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade5_school['division'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td colspan=2 class=xl76>Region:</td>
+  <td class=xl92>
+  <?php
+         if (isset($grade5_school) && !empty($grade5_school['region'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade5_school['region'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td class=xl66></td>
+  <td class=xl91 colspan=2 style='mso-ignore:colspan'>District:</td>
+  <td colspan=3 class=xl123>
+  <?php
+            if (isset($grade6_school) && !empty($grade6_school['district'])) {
+               echo '<strong>' . strtoupper(htmlspecialchars($grade6_school['district'])) . '</strong>';
+            } else {
+               echo '&nbsp;';
+            }
+      ?>
+  </td>
+  <td class=xl66 colspan=3 style='mso-ignore:colspan'>Division:</td>
+  <td colspan=17 class=xl94>
+  <?php
+         if (isset($grade6_school) && !empty($grade6_school['division'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade6_school['division'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td colspan=3 class=xl76>Region:</td>
+  <td class=xl93 style='border-top:none'>
+  <?php
+         if (isset($grade6_school) && !empty($grade6_school['region'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade6_school['region'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <td class=xl91 colspan=4 style='mso-ignore:colspan'>Classified as Grade:</td>
+  <td class=xl94>
+  <?php
+         if (isset($grade5_school) && !empty($grade5_school['grade_level'])) {
+            $roman5 = grade_label_to_roman($grade5_school['grade_level']);
+            echo '<strong>' . htmlspecialchars($roman5) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td class=xl95 colspan=2 style='mso-ignore:colspan'>Section:</td>
+  <td class=xl66></td>
+  <td colspan=5 class=xl94>
+  <?php
+         if (isset($grade5_school) && !empty($grade5_school['section'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade5_school['section'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td colspan=4 class=xl75>School Year:</td>
+  <td colspan=2 class=xl94 style='border-right:1.0pt solid black'>
+  <?php
+         if (isset($grade5_school) && !empty($grade5_school['school_year'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade5_school['school_year'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td class=xl66></td>
+  <td colspan=4 class=xl96>Classified as Grade:</td>
+  <td colspan=2 class=xl94>
+  <?php
+         if (isset($grade6_school) && !empty($grade6_school['grade_level'])) {
+            $roman6 = grade_label_to_roman($grade6_school['grade_level']);
+            echo '<strong>' . htmlspecialchars($roman6) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td colspan=3 class=xl76>Section:</td>
+  <td colspan=10 class=xl94>
+  <?php
+         if (isset($grade6_school) && !empty($grade6_school['section'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade6_school['section'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td colspan=6 class=xl76>School Year:</td>
+  <td colspan=4 class=xl94 style='border-right:1.0pt solid black'>
+  <?php
+         if (isset($grade6_school) && !empty($grade6_school['school_year'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade6_school['school_year'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=26 style='mso-height-source:userset;height:19.5pt'>
+  <td height=26 class=xl66 style='height:19.5pt'></td>
+  <td colspan=6 class=xl96>Name of Adviser/Teacher:</td>
+  <td colspan=7 class=xl94>
+  <?php
+         if (isset($grade5_school) && !empty($grade5_school['adviser_name'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade5_school['adviser_name'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td colspan=3 class=xl76>Signature:</td>
+  <td colspan=3 class=xl94 style='border-right:1.0pt solid black'>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl96 colspan=5 style='mso-ignore:colspan'>Name of Adviser/Teacher:</td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td colspan=13 class=xl94>
+  <?php
+         if (isset($grade6_school) && !empty($grade6_school['adviser_name'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade6_school['adviser_name'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td colspan=5 class=xl76>Signature:</td>
+  <td colspan=4 class=xl123 style='border-right:1.0pt solid black'>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=4 style='mso-height-source:userset;height:3.0pt'>
+  <td height=4 class=xl66 style='height:3.0pt'></td>
+  <td class=xl97>&nbsp;</td>
+  <td class=xl98>&nbsp;</td>
+  <td class=xl98>&nbsp;</td>
+  <td class=xl98>&nbsp;</td>
+  <td class=xl98>&nbsp;</td>
+  <td class=xl98>&nbsp;</td>
+  <td class=xl98>&nbsp;</td>
+  <td class=xl98>&nbsp;</td>
+  <td class=xl98>&nbsp;</td>
+  <td class=xl99>&nbsp;</td>
+  <td class=xl99>&nbsp;</td>
+  <td class=xl99>&nbsp;</td>
+  <td class=xl99>&nbsp;</td>
+  <td class=xl99>&nbsp;</td>
+  <td class=xl99>&nbsp;</td>
+  <td class=xl99>&nbsp;</td>
+  <td class=xl99>&nbsp;</td>
+  <td class=xl99>&nbsp;</td>
+  <td class=xl100>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl101>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl103>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=20 style='mso-height-source:userset;height:15.0pt'>
+  <td height=20 class=xl66 style='height:15.0pt'></td>
+  <td colspan=9 rowspan=2 class=xl216 width=268 style='border-right:.5pt solid black;
+  border-bottom:.5pt solid black;width:202pt'>LEARNING AREAS</td>
+  <td colspan=5 class=xl136 width=140 style='border-right:.5pt solid black;
+  border-left:none;width:105pt'>Quarterly Rating</td>
+  <td colspan=3 rowspan=2 class=xl220 width=62 style='border-right:.5pt solid black;
+  border-bottom:.5pt solid black;width:47pt'>Final Rating</td>
+  <td colspan=2 rowspan=2 class=xl220 width=89 style='border-right:1.0pt solid black;
+  border-bottom:.5pt solid black;width:67pt'>Remarks</td>
+  <td class=xl66></td>
+  <td colspan=14 rowspan=2 class=xl216 width=265 style='border-right:.5pt solid black;
+  border-bottom:.5pt solid black;width:202pt'>Learning Areas</td>
+  <td colspan=10 class=xl214 width=157 style='border-left:none;width:119pt'>Quarterly
+  Rating</td>
+  <td colspan=3 rowspan=2 class=xl133 width=57 style='border-right:.5pt solid black;
+  border-bottom:.5pt solid black;width:43pt'>Final Rating</td>
+  <td colspan=2 rowspan=2 class=xl133 width=85 style='border-right:1.0pt solid black;
+  border-bottom:.5pt solid black;width:64pt'>Remarks</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=17 style='mso-height-source:userset;height:12.75pt'>
+  <td height=17 class=xl66 style='height:12.75pt'></td>
+  <td class=xl104 style='border-top:none;border-left:none'>1</td>
+  <td colspan=2 class=xl162 style='border-right:.5pt solid black;border-left:
+  none'>2</td>
+  <td class=xl104 style='border-top:none;border-left:none'>3</td>
+  <td class=xl104 style='border-top:none;border-left:none'>4</td>
+  <td class=xl66></td>
+  <td colspan=3 class=xl162 style='border-right:.5pt solid black;border-left:
+  none'>1</td>
+  <td colspan=2 class=xl162 style='border-right:.5pt solid black;border-left:
+  none'>2</td>
+  <td colspan=3 class=xl162 style='border-right:.5pt solid black;border-left:
+  none'>3</td>
+  <td colspan=2 class=xl162 style='border-right:.5pt solid black;border-left:
+  none'>4</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade5_school) && $grade5_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 1; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade5_school['id']));
+        } else {
+           echo 'Mother Tongue';
+        }
+    ?>
+  </td>
+   <?php $row5 = $grades_grade5[1] ?? null; ?>
+<td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q1']) && $row5['q1'] !== '') ? '<strong>' . round($row5['q1']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q2']) && $row5['q2'] !== '') ? '<strong>' . round($row5['q2']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q3']) && $row5['q3'] !== '') ? '<strong>' . round($row5['q3']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q4']) && $row5['q4'] !== '') ? '<strong>' . round($row5['q4']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['final_rating']) && $row5['final_rating'] !== '') ? '<strong>' . round($row5['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl197 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['remarks']) && $row5['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row5['remarks']) . '</span>' : '&nbsp;'; ?></td>  
+<td class=xl66></td>
+  <td colspan=14 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade6_school) && $grade6_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 1; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade6_school['id']));
+        } else {
+           echo 'Mother Tongue';
+        }
+    ?>
+  </td>
+  <?php $row6 = $grades_grade6[1] ?? null; ?>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q1']) && $row6['q1'] !== '') ? '<strong>' . round($row6['q1']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl225 width=42 style='border-right:.5pt solid black;border-left:none;width:32pt'><?php echo ($row6 && isset($row6['q2']) && $row6['q2'] !== '') ? '<strong>' . round($row6['q2']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q3']) && $row6['q3'] !== '') ? '<strong>' . round($row6['q3']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q4']) && $row6['q4'] !== '') ? '<strong>' . round($row6['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['final_rating']) && $row6['final_rating'] !== '') ? '<strong>' . round($row6['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row6 && isset($row6['remarks']) && $row6['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row6['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade5_school) && $grade5_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 2; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade5_school['id']));
+        } else {
+           echo 'Filipino';
+        }
+    ?>
+  </td>
+  <?php $row5 = $grades_grade5[2] ?? null; ?>
+   <td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q1']) && $row5['q1'] !== '') ? '<strong>' . round($row5['q1']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q2']) && $row5['q2'] !== '') ? '<strong>' . round($row5['q2']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q3']) && $row5['q3'] !== '') ? '<strong>' . round($row5['q3']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q4']) && $row5['q4'] !== '') ? '<strong>' . round($row5['q4']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['final_rating']) && $row5['final_rating'] !== '') ? '<strong>' . round($row5['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl197 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['remarks']) && $row5['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row5['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade6_school) && $grade6_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 2; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade6_school['id']));
+        } else {
+           echo 'Filipino';
+        }
+    ?>
+  </td>
+  <?php $row6 = $grades_grade6[2] ?? null; ?>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q1']) && $row6['q1'] !== '') ? '<strong>' . round($row6['q1']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl225 width=42 style='border-right:.5pt solid black;border-left:none;width:32pt'><?php echo ($row6 && isset($row6['q2']) && $row6['q2'] !== '') ? '<strong>' . round($row6['q2']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q3']) && $row6['q3'] !== '') ? '<strong>' . round($row6['q3']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q4']) && $row6['q4'] !== '') ? '<strong>' . round($row6['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['final_rating']) && $row6['final_rating'] !== '') ? '<strong>' . round($row6['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row6 && isset($row6['remarks']) && $row6['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row6['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade5_school) && $grade5_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 3; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade5_school['id']));
+        } else {
+           echo 'English';
+        }
+  ?>
+  </td>
+ <?php $row5 = $grades_grade5[3] ?? null; ?>
+   <td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q1']) && $row5['q1'] !== '') ? '<strong>' . round($row5['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q2']) && $row5['q2'] !== '') ? '<strong>' . round($row5['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q3']) && $row5['q3'] !== '') ? '<strong>' . round($row5['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q4']) && $row5['q4'] !== '') ? '<strong>' . round($row5['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['final_rating']) && $row5['final_rating'] !== '') ? '<strong>' . round($row5['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl197 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['remarks']) && $row5['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row5['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade6_school) && $grade6_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 3; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade6_school['id']));
+        } else {
+           echo 'English';
+        }
+  ?>
+  </td>
+  <?php $row6 = $grades_grade6[3] ?? null; ?>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q1']) && $row6['q1'] !== '') ? '<strong>' . round($row6['q1']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl225 width=42 style='border-right:.5pt solid black;border-left:none;width:32pt'><?php echo ($row6 && isset($row6['q2']) && $row6['q2'] !== '') ? '<strong>' . round($row6['q2']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q3']) && $row6['q3'] !== '') ? '<strong>' . round($row6['q3']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q4']) && $row6['q4'] !== '') ? '<strong>' . round($row6['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['final_rating']) && $row6['final_rating'] !== '') ? '<strong>' . round($row6['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row6 && isset($row6['remarks']) && $row6['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row6['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade5_school) && $grade5_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 4; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade5_school['id']));
+        } else {
+           echo 'Mathematics';
+        }
+    ?>
+  </td>
+  <?php $row5 = $grades_grade5[4] ?? null; ?>
+   <td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q1']) && $row5['q1'] !== '') ? '<strong>' . round($row5['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q2']) && $row5['q2'] !== '') ? '<strong>' . round($row5['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q3']) && $row5['q3'] !== '') ? '<strong>' . round($row5['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q4']) && $row5['q4'] !== '') ? '<strong>' . round($row5['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['final_rating']) && $row5['final_rating'] !== '') ? '<strong>' . round($row5['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl197 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['remarks']) && $row5['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row5['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade6_school) && $grade6_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 4; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade6_school['id']));
+        } else {
+           echo 'Mathematics';
+        }
+    ?>
+  </td>
+  <?php $row6 = $grades_grade6[4] ?? null; ?>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q1']) && $row6['q1'] !== '') ? '<strong>' . round($row6['q1']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl225 width=42 style='border-right:.5pt solid black;border-left:none;width:32pt'><?php echo ($row6 && isset($row6['q2']) && $row6['q2'] !== '') ? '<strong>' . round($row6['q2']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q3']) && $row6['q3'] !== '') ? '<strong>' . round($row6['q3']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q4']) && $row6['q4'] !== '') ? '<strong>' . round($row6['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['final_rating']) && $row6['final_rating'] !== '') ? '<strong>' . round($row6['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row6 && isset($row6['remarks']) && $row6['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row6['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade5_school) && $grade5_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 5; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade5_school['id']));
+        } else {
+           echo 'Science';
+        }
+    ?>
+  </td>
+  <?php $row5 = $grades_grade5[5] ?? null; ?>
+   <td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q1']) && $row5['q1'] !== '') ? '<strong>' . round($row5['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q2']) && $row5['q2'] !== '') ? '<strong>' . round($row5['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q3']) && $row5['q3'] !== '') ? '<strong>' . round($row5['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q4']) && $row5['q4'] !== '') ? '<strong>' . round($row5['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['final_rating']) && $row5['final_rating'] !== '') ? '<strong>' . round($row5['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl197 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['remarks']) && $row5['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row5['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade6_school) && $grade6_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 5; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade6_school['id']));
+        } else {
+           echo 'Science';
+        }
+    ?>
+  </td>
+  <?php $row6 = $grades_grade6[5] ?? null; ?>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q1']) && $row6['q1'] !== '') ? '<strong>' . round($row6['q1']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl225 width=42 style='border-right:.5pt solid black;border-left:none;width:32pt'><?php echo ($row6 && isset($row6['q2']) && $row6['q2'] !== '') ? '<strong>' . round($row6['q2']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q3']) && $row6['q3'] !== '') ? '<strong>' . round($row6['q3']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q4']) && $row6['q4'] !== '') ? '<strong>' . round($row6['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['final_rating']) && $row6['final_rating'] !== '') ? '<strong>' . round($row6['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row6 && isset($row6['remarks']) && $row6['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row6['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl168 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade5_school) && $grade5_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 6; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade5_school['id']));
+        } else {
+           echo 'Araling Panlipunan';
+        }
+    ?></td>
+  <?php $row5 = $grades_grade5[6] ?? null; ?>
+   <td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q1']) && $row5['q1'] !== '') ? '<strong>' . round($row5['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q2']) && $row5['q2'] !== '') ? '<strong>' . round($row5['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q3']) && $row5['q3'] !== '') ? '<strong>' . round($row5['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q4']) && $row5['q4'] !== '') ? '<strong>' . round($row5['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['final_rating']) && $row5['final_rating'] !== '') ? '<strong>' . round($row5['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl197 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['remarks']) && $row5['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row5['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl168 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade6_school) && $grade6_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 6; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade6_school['id']));
+        } else {
+           echo 'Araling Panlipunan';
+        }
+    ?></td>
+  <?php $row6 = $grades_grade6[6] ?? null; ?>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q1']) && $row6['q1'] !== '') ? '<strong>' . round($row6['q1']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl225 width=42 style='border-right:.5pt solid black;border-left:none;width:32pt'><?php echo ($row6 && isset($row6['q2']) && $row6['q2'] !== '') ? '<strong>' . round($row6['q2']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q3']) && $row6['q3'] !== '') ? '<strong>' . round($row6['q3']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q4']) && $row6['q4'] !== '') ? '<strong>' . round($row6['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['final_rating']) && $row6['final_rating'] !== '') ? '<strong>' . round($row6['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row6 && isset($row6['remarks']) && $row6['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row6['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade5_school) && $grade5_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 7; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade5_school['id']));
+        } else {
+           echo 'EPP / TLE';
+        }
+    ?>
+  </td>
+ <?php $row5 = $grades_grade5[7] ?? null; ?>
+   <td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q1']) && $row5['q1'] !== '') ? '<strong>' . round($row5['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q2']) && $row5['q2'] !== '') ? '<strong>' . round($row5['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q3']) && $row5['q3'] !== '') ? '<strong>' . round($row5['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q4']) && $row5['q4'] !== '') ? '<strong>' . round($row5['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['final_rating']) && $row5['final_rating'] !== '') ? '<strong>' . round($row5['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl197 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['remarks']) && $row5['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row5['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade6_school) && $grade6_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 7; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade6_school['id']));
+        } else {
+           echo 'EPP / TLE';
+        }
+    ?>
+  </td>
+  <?php $row6 = $grades_grade6[7] ?? null; ?>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q1']) && $row6['q1'] !== '') ? '<strong>' . round($row6['q1']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl225 width=42 style='border-right:.5pt solid black;border-left:none;width:32pt'><?php echo ($row6 && isset($row6['q2']) && $row6['q2'] !== '') ? '<strong>' . round($row6['q2']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q3']) && $row6['q3'] !== '') ? '<strong>' . round($row6['q3']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q4']) && $row6['q4'] !== '') ? '<strong>' . round($row6['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['final_rating']) && $row6['final_rating'] !== '') ? '<strong>' . round($row6['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row6 && isset($row6['remarks']) && $row6['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row6['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade5_school) && $grade5_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 8; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade5_school['id']));
+        } else {
+           echo 'MAPEH';
+        }
+    ?>
+  </td>
+  <?php $row5 = $grades_grade5[8] ?? null; ?>
+<td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q1']) && $row5['q1'] !== '') ? '<strong>' . round($row5['q1']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q2']) && $row5['q2'] !== '') ? '<strong>' . round($row5['q2']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q3']) && $row5['q3'] !== '') ? '<strong>' . round($row5['q3']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q4']) && $row5['q4'] !== '') ? '<strong>' . round($row5['q4']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['final_rating']) && $row5['final_rating'] !== '') ? '<strong>' . round($row5['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl197 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['remarks']) && $row5['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row5['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade6_school) && $grade6_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 8; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade6_school['id']));
+        } else {
+           echo 'MAPEH';
+        }
+    ?>
+  </td>
+  <?php $row6 = $grades_grade6[8] ?? null; ?>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q1']) && $row6['q1'] !== '') ? '<strong>' . round($row6['q1']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl225 width=42 style='border-right:.5pt solid black;border-left:none;width:32pt'><?php echo ($row6 && isset($row6['q2']) && $row6['q2'] !== '') ? '<strong>' . round($row6['q2']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q3']) && $row6['q3'] !== '') ? '<strong>' . round($row6['q3']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q4']) && $row6['q4'] !== '') ? '<strong>' . round($row6['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['final_rating']) && $row6['final_rating'] !== '') ? '<strong>' . round($row6['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row6 && isset($row6['remarks']) && $row6['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row6['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl178 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade5_school) && $grade5_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 9; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade5_school['id']));
+        } else {
+           echo 'Music';
+        }
+    ?>
+  </td>
+  <?php $row5 = $grades_grade5[9] ?? null; ?>
+<td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q1']) && $row5['q1'] !== '') ? '<strong>' . round($row5['q1']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q2']) && $row5['q2'] !== '') ? '<strong>' . round($row5['q2']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q3']) && $row5['q3'] !== '') ? '<strong>' . round($row5['q3']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q4']) && $row5['q4'] !== '') ? '<strong>' . round($row5['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=2 class=xl197 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl178 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade6_school) && $grade6_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 9; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade6_school['id']));
+        } else {
+           echo 'Music';
+        }
+    ?>
+  </td>
+  <?php $row6 = $grades_grade6[9] ?? null; ?>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q1']) && $row6['q1'] !== '') ? '<strong>' . round($row6['q1']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl225 width=42 style='border-right:.5pt solid black;border-left:none;width:32pt'><?php echo ($row6 && isset($row6['q2']) && $row6['q2'] !== '') ? '<strong>' . round($row6['q2']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q3']) && $row6['q3'] !== '') ? '<strong>' . round($row6['q3']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q4']) && $row6['q4'] !== '') ? '<strong>' . round($row6['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl178 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade5_school) && $grade5_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 10; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade5_school['id']));
+        } else {
+           echo 'Arts';
+        }
+    ?>
+  </td>
+  <?php $row5 = $grades_grade5[10] ?? null; ?>
+<td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q1']) && $row5['q1'] !== '') ? '<strong>' . round($row5['q1']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q2']) && $row5['q2'] !== '') ? '<strong>' . round($row5['q2']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q3']) && $row5['q3'] !== '') ? '<strong>' . round($row5['q3']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q4']) && $row5['q4'] !== '') ? '<strong>' . round($row5['q4']) . '</strong>' : '&nbsp;'; ?></td>  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=2 class=xl197 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl178 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade6_school) && $grade6_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 10; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade6_school['id']));
+        } else {
+           echo 'Arts';
+        }
+    ?>
+  </td>
+  <?php $row6 = $grades_grade6[10] ?? null; ?>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q1']) && $row6['q1'] !== '') ? '<strong>' . round($row6['q1']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl225 width=42 style='border-right:.5pt solid black;border-left:none;width:32pt'><?php echo ($row6 && isset($row6['q2']) && $row6['q2'] !== '') ? '<strong>' . round($row6['q2']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q3']) && $row6['q3'] !== '') ? '<strong>' . round($row6['q3']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q4']) && $row6['q4'] !== '') ? '<strong>' . round($row6['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl178 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade5_school) && $grade5_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 11; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade5_school['id']));
+        } else {
+           echo 'Physical Education';
+        }
+    ?></td>
+  <?php $row5 = $grades_grade5[11] ?? null; ?>
+<td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q1']) && $row5['q1'] !== '') ? '<strong>' . round($row5['q1']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q2']) && $row5['q2'] !== '') ? '<strong>' . round($row5['q2']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q3']) && $row5['q3'] !== '') ? '<strong>' . round($row5['q3']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q4']) && $row5['q4'] !== '') ? '<strong>' . round($row5['q4']) . '</strong>' : '&nbsp;'; ?></td>  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=2 class=xl197 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl178 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade6_school) && $grade6_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 11; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade6_school['id']));
+        } else {
+           echo 'Physical Education';
+        }
+    ?></td>
+  <?php $row6 = $grades_grade6[11] ?? null; ?>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q1']) && $row6['q1'] !== '') ? '<strong>' . round($row6['q1']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl225 width=42 style='border-right:.5pt solid black;border-left:none;width:32pt'><?php echo ($row6 && isset($row6['q2']) && $row6['q2'] !== '') ? '<strong>' . round($row6['q2']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q3']) && $row6['q3'] !== '') ? '<strong>' . round($row6['q3']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q4']) && $row6['q4'] !== '') ? '<strong>' . round($row6['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl178 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade5_school) && $grade5_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 12; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade5_school['id']));
+        } else {
+           echo 'Health';
+        }
+    ?></td>
+ <?php $row5 = $grades_grade5[12] ?? null; ?>
+<td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q1']) && $row5['q1'] !== '') ? '<strong>' . round($row5['q1']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q2']) && $row5['q2'] !== '') ? '<strong>' . round($row5['q2']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q3']) && $row5['q3'] !== '') ? '<strong>' . round($row5['q3']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q4']) && $row5['q4'] !== '') ? '<strong>' . round($row5['q4']) . '</strong>' : '&nbsp;'; ?></td>  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=2 class=xl197 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl271 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade6_school) && $grade6_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 12; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade6_school['id']));
+        } else {
+           echo 'Health';
+        }
+    ?></td>
+  <?php $row6 = $grades_grade6[12] ?? null; ?>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q1']) && $row6['q1'] !== '') ? '<strong>' . round($row6['q1']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl225 width=42 style='border-right:.5pt solid black;border-left:none;width:32pt'><?php echo ($row6 && isset($row6['q2']) && $row6['q2'] !== '') ? '<strong>' . round($row6['q2']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q3']) && $row6['q3'] !== '') ? '<strong>' . round($row6['q3']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q4']) && $row6['q4'] !== '') ? '<strong>' . round($row6['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl168 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade5_school) && $grade5_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 13; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade5_school['id']));
+        } else {
+           echo 'Eduk. sa Pagpapakatao';
+        }
+    ?></td>
+  <?php $row5 = $grades_grade5[13] ?? null; ?>
+<td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q1']) && $row5['q1'] !== '') ? '<strong>' . round($row5['q1']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q2']) && $row5['q2'] !== '') ? '<strong>' . round($row5['q2']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q3']) && $row5['q3'] !== '') ? '<strong>' . round($row5['q3']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q4']) && $row5['q4'] !== '') ? '<strong>' . round($row5['q4']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['final_rating']) && $row5['final_rating'] !== '') ? '<strong>' . round($row5['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl197 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['remarks']) && $row5['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row5['remarks']) . '</span>' : '&nbsp;'; ?></td>  
+<td class=xl66></td>
+  <td colspan=14 class=xl168 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade6_school) && $grade6_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 13; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade6_school['id']));
+        } else {
+           echo 'Eduk. sa Pagpapakatao';
+        }
+    ?></td>
+  <?php $row6 = $grades_grade6[13] ?? null; ?>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q1']) && $row6['q1'] !== '') ? '<strong>' . round($row6['q1']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl225 width=42 style='border-right:.5pt solid black;border-left:none;width:32pt'><?php echo ($row6 && isset($row6['q2']) && $row6['q2'] !== '') ? '<strong>' . round($row6['q2']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q3']) && $row6['q3'] !== '') ? '<strong>' . round($row6['q3']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q4']) && $row6['q4'] !== '') ? '<strong>' . round($row6['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['final_rating']) && $row6['final_rating'] !== '') ? '<strong>' . round($row6['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row6 && isset($row6['remarks']) && $row6['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row6['remarks']) . '</span>' : '&nbsp;'; ?></td>
+ <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl173 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade5_school) && $grade5_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 14; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade5_school['id']));
+        } else {
+           echo '*Arabic Language';
+        }
+    ?></td>
+  <?php $row5 = $grades_grade5[14] ?? null; ?>
+<td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q1']) && $row5['q1'] !== '') ? '<strong>' . round($row5['q1']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q2']) && $row5['q2'] !== '') ? '<strong>' . round($row5['q2']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q3']) && $row5['q3'] !== '') ? '<strong>' . round($row5['q3']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q4']) && $row5['q4'] !== '') ? '<strong>' . round($row5['q4']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['final_rating']) && $row5['final_rating'] !== '') ? '<strong>' . round($row5['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl197 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['remarks']) && $row5['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row5['remarks']) . '</span>' : '&nbsp;'; ?></td>  <td class=xl66></td>
+  <td colspan=14 class=xl173 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade6_school) && $grade6_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 14; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade6_school['id']));
+        } else {
+           echo '*Arabic Language';
+        }
+    ?></td>
+  <?php $row6 = $grades_grade6[14] ?? null; ?>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q1']) && $row6['q1'] !== '') ? '<strong>' . round($row6['q1']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl225 width=42 style='border-right:.5pt solid black;border-left:none;width:32pt'><?php echo ($row6 && isset($row6['q2']) && $row6['q2'] !== '') ? '<strong>' . round($row6['q2']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q3']) && $row6['q3'] !== '') ? '<strong>' . round($row6['q3']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q4']) && $row6['q4'] !== '') ? '<strong>' . round($row6['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['final_rating']) && $row6['final_rating'] !== '') ? '<strong>' . round($row6['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row6 && isset($row6['remarks']) && $row6['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row6['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl173 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade5_school) && $grade4_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 15; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade4_school['id']));
+        } else {
+           echo '*Islamic Values Education';
+        }
+    ?></td>
+  <?php $row5 = $grades_grade5[15] ?? null; ?>
+<td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q1']) && $row5['q1'] !== '') ? '<strong>' . round($row5['q1']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q2']) && $row5['q2'] !== '') ? '<strong>' . round($row5['q2']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q3']) && $row5['q3'] !== '') ? '<strong>' . round($row5['q3']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['q4']) && $row5['q4'] !== '') ? '<strong>' . round($row5['q4']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['final_rating']) && $row5['final_rating'] !== '') ? '<strong>' . round($row5['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl197 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row5 && isset($row5['remarks']) && $row5['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row5['remarks']) . '</span>' : '&nbsp;'; ?></td>  <td class=xl66></td>
+  <td colspan=14 class=xl173 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade6_school) && $grade6_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 15; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade6_school['id']));
+        } else {
+           echo '*Islamic Values Education';
+        }
+    ?></td>
+  <?php $row6 = $grades_grade6[15] ?? null; ?>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q1']) && $row6['q1'] !== '') ? '<strong>' . round($row6['q1']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl225 width=42 style='border-right:.5pt solid black;border-left:none;width:32pt'><?php echo ($row6 && isset($row6['q2']) && $row6['q2'] !== '') ? '<strong>' . round($row6['q2']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q3']) && $row6['q3'] !== '') ? '<strong>' . round($row6['q3']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['q4']) && $row6['q4'] !== '') ? '<strong>' . round($row6['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row6 && isset($row6['final_rating']) && $row6['final_rating'] !== '') ? '<strong>' . round($row6['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row6 && isset($row6['remarks']) && $row6['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row6['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl194 style='border-right:.5pt solid black'>General
+  Average</td>
+  <td class=xl109 style='border-left:none'>&nbsp;</td>
+  <td colspan=2 class=xl186 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl109 style='border-left:none'>&nbsp;</td>
+  <td class=xl109 style='border-left:none'>&nbsp;</td>
+   <td colspan=3 class=xl139 style='border-right:.5pt solid black;border-left:none'><?php echo ($ga5_row && isset($ga5_row['final_rating']) && $ga5_row['final_rating'] !== '') ? '<strong>' . round($ga5_row['final_rating']) . '%</strong>' : (($ga5_final !== null) ? '<strong>' . $ga5_final . '%</strong>' : '&nbsp;'); ?></td>
+  <td colspan=2 class=xl205 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl194 style='border-right:.5pt solid black'>General
+  Average</td>
+  <td colspan=3 class=xl139 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=2 class=xl139 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=3 class=xl139 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=2 class=xl139 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=3 class=xl139 style='border-right:.5pt solid black;border-left:
+  none'><?php echo ($ga6_row && isset($ga6_row['final_rating']) && $ga6_row['final_rating'] !== '') ? '<strong>' . round($ga6_row['final_rating']) . '%</strong>' : (($ga6_final !== null) ? '<strong>' . $ga6_final . '%</strong>' : '&nbsp;'); ?></td>
+  <td colspan=2 class=xl207 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=4 style='mso-height-source:userset;height:3.0pt'>
+  <td height=4 class=xl66 style='height:3.0pt'></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl85></td>
+  <td class=xl85></td>
+  <td class=xl85></td>
+  <td class=xl110></td>
+  <td class=xl110></td>
+  <td class=xl66></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl85></td>
+  <td class=xl85></td>
+  <td class=xl85></td>
+  <td class=xl85></td>
+  <td class=xl85></td>
+  <td class=xl85></td>
+  <td class=xl85></td>
+  <td class=xl85></td>
+  <td class=xl85></td>
+  <td class=xl85></td>
+  <td class=xl85></td>
+  <td class=xl85></td>
+  <td class=xl85></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=5 class=xl145 style='border-right:.5pt solid black'>Remedial
+  Classes</td>
+  <td colspan="4" class="xl142" style="border-left:
+   none">Conducted from:</td>
+   <td colspan="4" class="xl142" style="border-left:none; vertical-align:middle; text-align:center">
+   <?php
+      $r5_head = $remedial_grade5[0] ?? null;
+      if ($r5_head && !empty($r5_head['conducted_from'])) {
+          echo '<span style="font-size:1.05em;font-weight:700">' . date('m/d/Y', strtotime($r5_head['conducted_from'])) . '</span>';
+      } else {
+          echo '&nbsp;';
+      }
+   ?>
+</td>
+   <td colspan="1" class=xl142 style='border-left:
+   none'>&nbsp;&nbsp;to:</td>
+   <td colspan="5" class="xl142" style="border-right:1.0pt solid black; border-left:none; vertical-align:middle; text-align:center">
+   <?php
+      if ($r5_head && !empty($r5_head['conducted_to'])) {
+          echo '<span style="font-size:1.05em;font-weight:700">' . date('m/d/Y', strtotime($r5_head['conducted_to'])) . '</span>';
+      } else {
+          echo '&nbsp;';
+      }
+   ?>
+</td>                  
+  <td class=xl66></td>
+  <td colspan=5 class=xl145 style='border-right:.5pt solid black'>Remedial
+  Classes</td>
+   <td colspan=9 class=xl142 style='border-left:
+   none'>Conducted from:</td>
+   <td colspan=8 class=xl142 style='border-left:none; vertical-align:middle; text-align:center'>
+   <?php
+      $r6_head = $remedial_grade6[0] ?? null;
+      if ($r6_head && !empty($r6_head['conducted_from'])) {
+          echo '<span style="font-size:1.05em;font-weight:700">' . date('m/d/Y', strtotime($r6_head['conducted_from'])) . '</span>';
+      } else {
+          echo '&nbsp;';
+      }
+   ?>
+</td>
+   <td colspan=2 class=xl142 style='border-left:
+   none'>&nbsp;&nbsp;to:</td>
+   <td colspan=5 class=xl142 style='border-right:1.0pt solid black; border-left:none; vertical-align:middle; text-align:center'>
+   <?php
+      if ($r6_head && !empty($r6_head['conducted_to'])) {
+          echo '<span style="font-size:1.05em;font-weight:700">' . date('m/d/Y', strtotime($r6_head['conducted_to'])) . '</span>';
+      } else {
+          echo '&nbsp;';
+      }
+   ?>
+</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=42 style='mso-height-source:userset;height:31.5pt'>
+  <td height=42 class=xl66 style='height:31.5pt'></td>
+  <td colspan=5 class=xl148 style='border-right:.5pt solid black'>Learning
+  Areas</td>
+  <td colspan=4 class=xl202 style='border-right:.5pt solid black;border-left:
+  none'>Final Rating</td>
+  <td colspan=4 class=xl151 width=105 style='border-right:.5pt solid black;
+  border-left:none;width:79pt'>Remedial Class Mark</td>
+  <td colspan=4 class=xl151 width=97 style='border-right:.5pt solid black;
+  border-left:none;width:73pt'>Recomputed Final Grade</td>
+  <td colspan=2 class=xl199 style='border-right:1.0pt solid black;border-left:
+  none'>Remarks</td>
+  <td class=xl66></td>
+  <td colspan=5 class=xl148 style='border-right:.5pt solid black'>Learning
+  Areas</td>
+  <td colspan=9 class=xl151 width=108 style='border-left:none;width:84pt'>Final
+  Rating</td>
+  <td colspan="7" class="xl151" width="107" style="border-right:.5pt solid black;width:81pt">Remedial Class Mark</td>
+  <td colspan=6 class=xl152 width=107 style='border-right:.5pt solid black;
+  width:81pt'>Recomputed Final Grade</td>
+  <td colspan=2 class=xl199 style='border-right:1.0pt solid black;border-left:
+  none'>Remarks</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+   <?php $row = $remedial_grade5[0] ?? null; ?>
+   <td colspan=5 class=xl203 style='border-right:.5pt solid black'><?php echo ($row && isset($row['learning_area']) && $row['learning_area'] !== '') ? htmlspecialchars($row['learning_area']) : '&nbsp;'; ?></td>
+   <td colspan=4 class=xl183 style='border-right:.5pt solid black;border-left: none'><?php echo ($row && isset($row['final_rating']) && $row['final_rating'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row['final_rating']) . '</span>' : '&nbsp;'; ?></td>
+   <td colspan=4 class=xl132 style='border-left:none'><?php echo ($row && isset($row['remedial_class_mark']) && $row['remedial_class_mark'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row['remedial_class_mark']) . '</span>' : '&nbsp;'; ?></td>
+   <td colspan=4 class=xl183 style='border-right:.5pt solid black;border-left: none'><?php echo ($row && isset($row['recomputed_final_grade']) && $row['recomputed_final_grade'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row['recomputed_final_grade']) . '</span>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl181 style='border-right:1.0pt solid black;border-left: none'><?php echo ($row && isset($row['remarks']) && $row['remarks'] !== '') ? '<span style="font-size:1.1em;font-weight:700">' . format_remark_sheet($row['remarks']) . '</span>' : '&nbsp;'; ?></td>
+   <?php $row2 = $remedial_grade6[0] ?? null; ?>
+   <td class=xl66></td>
+   <td colspan=5 class=xl131><?php echo ($row2 && isset($row2['learning_area']) && $row2['learning_area'] !== '') ? htmlspecialchars($row2['learning_area']) : '&nbsp;'; ?></td>
+   <td colspan=9 class=xl132 style='border-left:none'><?php echo ($row2 && isset($row2['final_rating']) && $row2['final_rating'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row2['final_rating']) . '</span>' : '&nbsp;'; ?></td>
+   <td colspan=7 class=xl132 style='border-left:none'><?php echo ($row2 && isset($row2['remedial_class_mark']) && $row2['remedial_class_mark'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row2['remedial_class_mark']) . '</span>' : '&nbsp;'; ?></td>
+   <td colspan=6 class=xl132 style='border-left:none'><?php echo ($row2 && isset($row2['recomputed_final_grade']) && $row2['recomputed_final_grade'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row2['recomputed_final_grade']) . '</span>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl132 style='border-right:1.0pt solid black;border-left: none'><?php echo ($row2 && isset($row2['remarks']) && $row2['remarks'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . format_remark_sheet($row2['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <?php $row = $remedial_grade5[1] ?? null; ?>
+    <td colspan=5 class=xl203 style='border-right:.5pt solid black'><?php echo ($row && isset($row['learning_area']) && $row['learning_area'] !== '') ? htmlspecialchars($row['learning_area']) : '&nbsp;'; ?></td>
+    <td colspan=4 class=xl183 style='border-right:.5pt solid black;border-left: none'><?php echo ($row && isset($row['final_rating']) && $row['final_rating'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row['final_rating']) . '</span>' : '&nbsp;'; ?></td>
+    <td colspan=4 class=xl132 style='border-left:none'><?php echo ($row && isset($row['remedial_class_mark']) && $row['remedial_class_mark'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row['remedial_class_mark']) . '</span>' : '&nbsp;'; ?></td>
+    <td colspan=4 class=xl183 style='border-right:.5pt solid black;border-left: none'><?php echo ($row && isset($row['recomputed_final_grade']) && $row['recomputed_final_grade'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row['recomputed_final_grade']) . '</span>' : '&nbsp;'; ?></td>
+    <td colspan=2 class=xl181 style='border-right:1.0pt solid black;border-left: none'><?php echo ($row && isset($row['remarks']) && $row['remarks'] !== '') ? '<span style="font-size:1.1em;font-weight:700">' . format_remark_sheet($row['remarks']) . '</span>' : '&nbsp;'; ?></td>
+    <?php $row2 = $remedial_grade6[1] ?? null; ?>
+    <td class=xl66></td>
+    <td colspan=5 class=xl131><?php echo ($row2 && isset($row2['learning_area']) && $row2['learning_area'] !== '') ? htmlspecialchars($row2['learning_area']) : '&nbsp;'; ?></td>
+    <td colspan=9 class=xl132 style='border-left:none'><?php echo ($row2 && isset($row2['final_rating']) && $row2['final_rating'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row2['final_rating']) . '</span>' : '&nbsp;'; ?></td>
+    <td colspan=7 class=xl132 style='border-left:none'><?php echo ($row2 && isset($row2['remedial_class_mark']) && $row2['remedial_class_mark'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row2['remedial_class_mark']) . '</span>' : '&nbsp;'; ?></td>
+    <td colspan=6 class=xl132 style='border-left:none'><?php echo ($row2 && isset($row2['recomputed_final_grade']) && $row2['recomputed_final_grade'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row2['recomputed_final_grade']) . '</span>' : '&nbsp;'; ?></td>
+    <td colspan=2 class=xl132 style='border-right:1.0pt solid black;border-left: none'><?php echo ($row2 && isset($row2['remarks']) && $row2['remarks'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . format_remark_sheet($row2['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=16 style='mso-height-source:userset;height:7.5pt'>
+  <td height=16 class=xl66 style='height:7.5pt'></td>
+  <td colspan=10 class=xl111></td>
+  <td class=xl111></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td colspan=15 class=xl111></td>
+  <td class=xl111></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <td colspan=2 class=xl235>School:</td>
+  <td colspan=11 class=xl154>
+  <?php
+            if (isset($grade7_school) && !empty($grade7_school['school_name'])) {
+               echo '<strong>' . strtoupper(htmlspecialchars($grade7_school['school_name'])) . '</strong>';
+            } else {
+               echo '&nbsp;';
+            }
+         ?>
+  </td>
+  <td colspan=4 class=xl201>School ID:</td>
+  <td colspan=2 class=xl154 style='border-right:1.0pt solid black'>
+  <?php
+            if (isset($grade7_school) && !empty($grade7_school['school_id'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade7_school['school_id'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td class=xl66></td>
+  <td class=xl89 colspan=2 style='mso-ignore:colspan'>School:</td>
+  <td colspan=20 class=xl154>
+  <?php
+            if (isset($grade8_school) && !empty($grade8_school['school_name'])) {
+               echo '<strong>' . strtoupper(htmlspecialchars($grade8_school['school_name'])) . '</strong>';
+            } else {
+               echo '&nbsp;';
+            }
+         ?>
+  </td>
+  <td colspan=5 class=xl155>School ID:</td>
+  <td colspan=2 class=xl154 style='border-right:1.0pt solid black'>
+  <?php
+         if (isset($grade8_school) && !empty($grade8_school['school_id'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade8_school['school_id'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <td class=xl91 colspan=2 style='mso-ignore:colspan'>District:</td>
+  <td colspan=3 class=xl123>
+  <?php
+            if (isset($grade7_school) && !empty($grade7_school['district_name'])) {
+               echo '<strong>' . strtoupper(htmlspecialchars($grade7_school['district_name'])) . '</strong>';
+            } else {
+               echo '&nbsp;';
+            }
+         ?>
+  </td>
+  <td class=xl66 colspan=2 style='mso-ignore:colspan'>Division:</td>
+  <td colspan=9 class=xl94>
+  <?php
+         if (isset($grade7_school) && !empty($grade7_school['division'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade7_school['division'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td colspan=2 class=xl76>Region:</td>
+  <td class=xl92>
+  <?php
+         if (isset($grade7_school) && !empty($grade7_school['region'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade7_school['region'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td class=xl66></td>
+  <td class=xl91 colspan=2 style='mso-ignore:colspan'>District:</td>
+  <td colspan=3 class=xl123>
+  <?php
+         if (isset($grade8_school) && !empty($grade8_school['district_name'])) {
+               echo '<strong>' . strtoupper(htmlspecialchars($grade8_school['district_name'])) . '</strong>';
+            } else {
+               echo '&nbsp;';
+            }
+         ?>
+  </td>
+  <td class=xl66 colspan=3 style='mso-ignore:colspan'>Division:</td>
+  <td colspan=17 class=xl94>
+  <?php
+         if (isset($grade8_school) && !empty($grade8_school['division'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade8_school['division'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td colspan=3 class=xl76>Region:</td>
+  <td class=xl93 style='border-top:none'>
+  <?php
+         if (isset($grade8_school) && !empty($grade8_school['region'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade8_school['region'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <td class=xl91 colspan=4 style='mso-ignore:colspan'>Classified as Grade:</td>
+  <td class=xl94>
+  <?php
+         if (isset($grade7_school) && !empty($grade7_school['grade_level'])) {
+            $roman7 = grade_label_to_roman($grade7_school['grade_level']);
+            echo '<strong>' . htmlspecialchars($roman7) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td class=xl95 colspan=2 style='mso-ignore:colspan'>Section:</td>
+  <td class=xl66></td>
+  <td colspan=5 class=xl94>
+  <?php
+         if (isset($grade7_school) && !empty($grade7_school['section'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade7_school['section'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td colspan=4 class=xl75>School Year:</td>
+  <td colspan=2 class=xl94 style='border-right:1.0pt solid black'>
+  <?php
+         if (isset($grade7_school) && !empty($grade7_school['school_year'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade7_school['school_year'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td class=xl66></td>
+  <td colspan=4 class=xl96>Classified as Grade:</td>
+  <td colspan=2 class=xl94>
+  <?php
+         if (isset($grade8_school) && !empty($grade8_school['grade_level'])) {
+            $roman8 = grade_label_to_roman($grade8_school['grade_level']);
+            echo '<strong>' . htmlspecialchars($roman8) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td colspan=3 class=xl76>Section:</td>
+  <td colspan=10 class=xl94>
+  <?php
+         if (isset($grade8_school) && !empty($grade8_school['section'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade8_school['section'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td colspan=6 class=xl76>School Year:</td>
+  <td colspan=4 class=xl94 style='border-right:1.0pt solid black'>
+  <?php
+         if (isset($grade8_school) && !empty($grade8_school['school_year'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade8_school['school_year'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <td colspan=6 class=xl96>Name of Adviser/Teacher:</td>
+  <td colspan=7 class=xl94>
+  <?php
+         if (isset($grade7_school) && !empty($grade7_school['adviser_name'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade7_school['adviser_name'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td colspan=3 class=xl76>Signature:</td>
+  <td colspan=3 class=xl94 style='border-right:1.0pt solid black'>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl96 colspan=5 style='mso-ignore:colspan'>Name of Adviser/Teacher:</td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td colspan=13 class=xl94>
+  <?php
+         if (isset($grade8_school) && !empty($grade8_school['adviser_name'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade8_school['adviser_name'])) . '</strong>';
+         } else {
+            echo '&nbsp;';
+         }
+      ?>
+  </td>
+  <td colspan=5 class=xl76>Signature:</td>
+  <td colspan=4 class=xl123 style='border-right:1.0pt solid black'>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=5 style='mso-height-source:userset;height:3.75pt'>
+  <td height=5 class=xl66 style='height:3.75pt'></td>
+  <td class=xl101>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl103>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl101>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl102>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl70>&nbsp;</td>
+  <td class=xl103>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=5 style='mso-height-source:userset;height:3.75pt'>
+  <td height=5 class=xl66 style='height:3.75pt'></td>
+  <td class=xl112>&nbsp;</td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl113>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl112>&nbsp;</td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl75></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl113>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=24 style='mso-height-source:userset;height:18.0pt'>
+  <td height=24 class=xl66 style='height:18.0pt'></td>
+  <td colspan=9 rowspan=2 class=xl216 width=268 style='border-right:.5pt solid black;
+  border-bottom:.5pt solid black;width:202pt'>LEARNING AREAS</td>
+  <td colspan=5 class=xl237 width=140 style='border-right:.5pt solid black;
+  border-left:none;width:105pt'>Quarterly Rating</td>
+  <td colspan=3 rowspan=2 class=xl133 width=62 style='border-right:.5pt solid black;
+  border-bottom:.5pt solid black;width:47pt'>Final Rating</td>
+  <td colspan=2 rowspan=2 class=xl133 width=89 style='border-right:1.0pt solid black;
+  border-bottom:.5pt solid black;width:67pt'>Remarks</td>
+  <td class=xl66></td>
+  <td colspan=14 rowspan=2 class=xl216 width=265 style='border-right:.5pt solid black;
+  border-bottom:.5pt solid black;width:202pt'>Learning Areas</td>
+  <td colspan=10 class=xl214 width=157 style='border-left:none;width:119pt'>Quarterly
+  Rating</td>
+  <td colspan=3 rowspan=2 class=xl133 width=57 style='border-right:.5pt solid black;
+  border-bottom:.5pt solid black;width:43pt'>Final Rating</td>
+  <td colspan=2 rowspan=2 class=xl133 width=85 style='border-right:1.0pt solid black;
+  border-bottom:.5pt solid black;width:64pt'>Remarks</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=24 style='mso-height-source:userset;height:18.0pt'>
+  <td height=24 class=xl66 style='height:18.0pt'></td>
+  <td class=xl104 style='border-top:none;border-left:none'>1</td>
+  <td colspan=2 class=xl162 style='border-right:.5pt solid black;border-left:
+  none'>2</td>
+  <td class=xl104 style='border-top:none;border-left:none'>3</td>
+  <td class=xl104 style='border-top:none;border-left:none'>4</td>
+  <td class=xl66></td>
+  <td colspan=3 class=xl162 style='border-right:.5pt solid black;border-left:
+  none'>1</td>
+  <td colspan=2 class=xl162 style='border-right:.5pt solid black;border-left:
+  none'>2</td>
+  <td colspan=3 class=xl162 style='border-right:.5pt solid black;border-left:
+  none'>3</td>
+  <td colspan=2 class=xl162 style='border-right:.5pt solid black;border-left:
+  none'>4</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade7_school) && $grade7_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 1; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade7_school['id']));
+        } else {
+           echo 'Mother Tongue';
+        }
+    ?>
+  </td>
+   <?php $row7 = $grades_grade7[1] ?? null; ?>
+   <td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q1']) && $row7['q1'] !== '') ? '<strong>' . round($row7['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q2']) && $row7['q2'] !== '') ? '<strong>' . round($row7['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q3']) && $row7['q3'] !== '') ? '<strong>' . round($row7['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q4']) && $row7['q4'] !== '') ? '<strong>' . round($row7['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['final_rating']) && $row7['final_rating'] !== '') ? '<strong>' . round($row7['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['remarks']) && $row7['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row7['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade8_school) && $grade8_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 1; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade8_school['id']));
+        } else {
+           echo 'Mother Tongue';
+        }
+    ?>
+  </td>
+  <?php $row8 = $grades_grade8[1] ?? null; ?>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q1']) && $row8['q1'] !== '') ? '<strong>' . round($row8['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q2']) && $row8['q2'] !== '') ? '<strong>' . round($row8['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q3']) && $row8['q3'] !== '') ? '<strong>' . round($row8['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q4']) && $row8['q4'] !== '') ? '<strong>' . round($row8['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['final_rating']) && $row8['final_rating'] !== '') ? '<strong>' . round($row8['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row8 && isset($row8['remarks']) && $row8['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row8['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade7_school) && $grade7_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 2; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade7_school['id']));
+        } else {
+           echo 'Filipino';
+        }
+    ?>
+  </td>
+  <?php $row7 = $grades_grade7[2] ?? null; ?>
+   <td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q1']) && $row7['q1'] !== '') ? '<strong>' . round($row7['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q2']) && $row7['q2'] !== '') ? '<strong>' . round($row7['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q3']) && $row7['q3'] !== '') ? '<strong>' . round($row7['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q4']) && $row7['q4'] !== '') ? '<strong>' . round($row7['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['final_rating']) && $row7['final_rating'] !== '') ? '<strong>' . round($row7['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['remarks']) && $row7['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row7['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade8_school) && $grade8_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 2; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade8_school['id']));
+        } else {
+           echo 'Filipino';
+        }
+    ?>
+  </td>
+  <?php $row8 = $grades_grade8[2] ?? null; ?>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q1']) && $row8['q1'] !== '') ? '<strong>' . round($row8['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q2']) && $row8['q2'] !== '') ? '<strong>' . round($row8['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q3']) && $row8['q3'] !== '') ? '<strong>' . round($row8['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q4']) && $row8['q4'] !== '') ? '<strong>' . round($row8['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['final_rating']) && $row8['final_rating'] !== '') ? '<strong>' . round($row8['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row8 && isset($row8['remarks']) && $row8['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row8['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade7_school) && $grade7_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 3; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade7_school['id']));
+        } else {
+           echo 'English';
+        }
+  ?>
+  </td>
+  <?php $row7 = $grades_grade7[3] ?? null; ?>
+<td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q1']) && $row7['q1'] !== '') ? '<strong>' . round($row7['q1']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q2']) && $row7['q2'] !== '') ? '<strong>' . round($row7['q2']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q3']) && $row7['q3'] !== '') ? '<strong>' . round($row7['q3']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q4']) && $row7['q4'] !== '') ? '<strong>' . round($row7['q4']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['final_rating']) && $row7['final_rating'] !== '') ? '<strong>' . round($row7['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['remarks']) && $row7['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row7['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade8_school) && $grade8_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 3; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade8_school['id']));
+        } else {
+           echo 'English';
+        }
+  ?>
+  </td>
+  <?php $row8 = $grades_grade8[3] ?? null; ?>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q1']) && $row8['q1'] !== '') ? '<strong>' . round($row8['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q2']) && $row8['q2'] !== '') ? '<strong>' . round($row8['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q3']) && $row8['q3'] !== '') ? '<strong>' . round($row8['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q4']) && $row8['q4'] !== '') ? '<strong>' . round($row8['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['final_rating']) && $row8['final_rating'] !== '') ? '<strong>' . round($row8['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row8 && isset($row8['remarks']) && $row8['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row8['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade7_school) && $grade7_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 4; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade7_school['id']));
+        } else {
+           echo 'Mathematics';
+        }
+    ?>
+  </td>
+  <?php $row7 = $grades_grade7[4] ?? null; ?>
+   <td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q1']) && $row7['q1'] !== '') ? '<strong>' . round($row7['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q2']) && $row7['q2'] !== '') ? '<strong>' . round($row7['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q3']) && $row7['q3'] !== '') ? '<strong>' . round($row7['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q4']) && $row7['q4'] !== '') ? '<strong>' . round($row7['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['final_rating']) && $row7['final_rating'] !== '') ? '<strong>' . round($row7['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['remarks']) && $row7['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row7['remarks']) . '</span>' : '&nbsp;'; ?></td>
+ <td class=xl66></td>
+  <td colspan=14 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade8_school) && $grade8_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 4; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade8_school['id']));
+        } else {
+           echo 'Mathematics';
+        }
+    ?>
+  </td>
+  <?php $row8 = $grades_grade8[4] ?? null; ?>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q1']) && $row8['q1'] !== '') ? '<strong>' . round($row8['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q2']) && $row8['q2'] !== '') ? '<strong>' . round($row8['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q3']) && $row8['q3'] !== '') ? '<strong>' . round($row8['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q4']) && $row8['q4'] !== '') ? '<strong>' . round($row8['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['final_rating']) && $row8['final_rating'] !== '') ? '<strong>' . round($row8['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row8 && isset($row8['remarks']) && $row8['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row8['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade7_school) && $grade7_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 5; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade7_school['id']));
+        } else {
+           echo 'Science';
+        }
+    ?>
+  </td>
+  <?php $row7 = $grades_grade7[5] ?? null; ?>
+   <td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q1']) && $row7['q1'] !== '') ? '<strong>' . round($row7['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q2']) && $row7['q2'] !== '') ? '<strong>' . round($row7['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q3']) && $row7['q3'] !== '') ? '<strong>' . round($row7['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q4']) && $row7['q4'] !== '') ? '<strong>' . round($row7['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['final_rating']) && $row7['final_rating'] !== '') ? '<strong>' . round($row7['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['remarks']) && $row7['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row7['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade8_school) && $grade8_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 5; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade8_school['id']));
+        } else {
+           echo 'Science';
+        }
+    ?>
+  </td>
+  <?php $row8 = $grades_grade8[5] ?? null; ?>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q1']) && $row8['q1'] !== '') ? '<strong>' . round($row8['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q2']) && $row8['q2'] !== '') ? '<strong>' . round($row8['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q3']) && $row8['q3'] !== '') ? '<strong>' . round($row8['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q4']) && $row8['q4'] !== '') ? '<strong>' . round($row8['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['final_rating']) && $row8['final_rating'] !== '') ? '<strong>' . round($row8['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row8 && isset($row8['remarks']) && $row8['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row8['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl168 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade7_school) && $grade7_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 6; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade7_school['id']));
+        } else {
+           echo 'Araling Panlipunan';
+        }
+    ?></td>
+  <?php $row7 = $grades_grade7[6] ?? null; ?>
+<td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q1']) && $row7['q1'] !== '') ? '<strong>' . round($row7['q1']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q2']) && $row7['q2'] !== '') ? '<strong>' . round($row7['q2']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q3']) && $row7['q3'] !== '') ? '<strong>' . round($row7['q3']) . '</strong>' : '&nbsp;'; ?></td>
+<td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q4']) && $row7['q4'] !== '') ? '<strong>' . round($row7['q4']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['final_rating']) && $row7['final_rating'] !== '') ? '<strong>' . round($row7['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+<td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['remarks']) && $row7['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row7['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl168 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade8_school) && $grade8_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 6; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade8_school['id']));
+        } else {
+           echo 'Araling Panlipunan';
+        }
+    ?></td>
+  <?php $row8 = $grades_grade8[6] ?? null; ?>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q1']) && $row8['q1'] !== '') ? '<strong>' . round($row8['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q2']) && $row8['q2'] !== '') ? '<strong>' . round($row8['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q3']) && $row8['q3'] !== '') ? '<strong>' . round($row8['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q4']) && $row8['q4'] !== '') ? '<strong>' . round($row8['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['final_rating']) && $row8['final_rating'] !== '') ? '<strong>' . round($row8['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row8 && isset($row8['remarks']) && $row8['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row8['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade7_school) && $grade7_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 7; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade7_school['id']));
+        } else {
+           echo 'EPP / TLE';
+        }
+    ?>
+  </td>
+  <?php $row7 = $grades_grade7[7] ?? null; ?>
+   <td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q1']) && $row7['q1'] !== '') ? '<strong>' . round($row7['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q2']) && $row7['q2'] !== '') ? '<strong>' . round($row7['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q3']) && $row7['q3'] !== '') ? '<strong>' . round($row7['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q4']) && $row7['q4'] !== '') ? '<strong>' . round($row7['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['final_rating']) && $row7['final_rating'] !== '') ? '<strong>' . round($row7['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['remarks']) && $row7['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row7['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade8_school) && $grade8_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 7; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade8_school['id']));
+        } else {
+           echo 'EPP / TLE';
+        }
+    ?>
+  </td>
+  <?php $row8 = $grades_grade8[7] ?? null; ?>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q1']) && $row8['q1'] !== '') ? '<strong>' . round($row8['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q2']) && $row8['q2'] !== '') ? '<strong>' . round($row8['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q3']) && $row8['q3'] !== '') ? '<strong>' . round($row8['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q4']) && $row8['q4'] !== '') ? '<strong>' . round($row8['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['final_rating']) && $row8['final_rating'] !== '') ? '<strong>' . round($row8['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row8 && isset($row8['remarks']) && $row8['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row8['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade7_school) && $grade7_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 8; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade7_school['id']));
+        } else {
+           echo 'MAPEH';
+        }
+    ?>
+  </td>
+  <?php $row7 = $grades_grade7[8] ?? null; ?>
+   <td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q1']) && $row7['q1'] !== '') ? '<strong>' . round($row7['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q2']) && $row7['q2'] !== '') ? '<strong>' . round($row7['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q3']) && $row7['q3'] !== '') ? '<strong>' . round($row7['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q4']) && $row7['q4'] !== '') ? '<strong>' . round($row7['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['final_rating']) && $row7['final_rating'] !== '') ? '<strong>' . round($row7['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['remarks']) && $row7['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row7['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl168 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade8_school) && $grade8_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 8; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade8_school['id']));
+        } else {
+           echo 'MAPEH';
+        }
+    ?>
+  </td>
+  <?php $row8 = $grades_grade8[8] ?? null; ?>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q1']) && $row8['q1'] !== '') ? '<strong>' . round($row8['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q2']) && $row8['q2'] !== '') ? '<strong>' . round($row8['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q3']) && $row8['q3'] !== '') ? '<strong>' . round($row8['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q4']) && $row8['q4'] !== '') ? '<strong>' . round($row8['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['final_rating']) && $row8['final_rating'] !== '') ? '<strong>' . round($row8['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row8 && isset($row8['remarks']) && $row8['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row8['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl178 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade7_school) && $grade7_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 9; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade7_school['id']));
+        } else {
+           echo 'Music';
+        }
+    ?>
+  </td>
+  <?php $row7 = $grades_grade7[9] ?? null; ?>
+   <td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q1']) && $row7['q1'] !== '') ? '<strong>' . round($row7['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q2']) && $row7['q2'] !== '') ? '<strong>' . round($row7['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q3']) && $row7['q3'] !== '') ? '<strong>' . round($row7['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q4']) && $row7['q4'] !== '') ? '<strong>' . round($row7['q4']) . '</strong>' : '&nbsp;'; ?></td>   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'>&nbsp;</td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl178 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade8_school) && $grade8_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 9; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade8_school['id']));
+        } else {
+           echo 'Music';
+        }
+    ?>
+  </td>
+  <?php $row8 = $grades_grade8[9] ?? null; ?>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q1']) && $row8['q1'] !== '') ? '<strong>' . round($row8['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q2']) && $row8['q2'] !== '') ? '<strong>' . round($row8['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q3']) && $row8['q3'] !== '') ? '<strong>' . round($row8['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q4']) && $row8['q4'] !== '') ? '<strong>' . round($row8['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl178 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade7_school) && $grade7_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 10; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade7_school['id']));
+        } else {
+           echo 'Arts';
+        }
+    ?>
+  </td>
+  <?php $row7 = $grades_grade7[10] ?? null; ?>
+   <td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q1']) && $row7['q1'] !== '') ? '<strong>' . round($row7['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q2']) && $row7['q2'] !== '') ? '<strong>' . round($row7['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q3']) && $row7['q3'] !== '') ? '<strong>' . round($row7['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q4']) && $row7['q4'] !== '') ? '<strong>' . round($row7['q4']) . '</strong>' : '&nbsp;'; ?></td>  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl178 style='border-right:.5pt solid black'>
+  <?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade8_school) && $grade8_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 10; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade8_school['id']));
+        } else {
+           echo 'Arts';
+        }
+    ?>
+  </td>
+  <?php $row8 = $grades_grade8[10] ?? null; ?>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q1']) && $row8['q1'] !== '') ? '<strong>' . round($row8['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q2']) && $row8['q2'] !== '') ? '<strong>' . round($row8['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q3']) && $row8['q3'] !== '') ? '<strong>' . round($row8['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q4']) && $row8['q4'] !== '') ? '<strong>' . round($row8['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl178 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade7_school) && $grade7_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 11; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade7_school['id']));
+        } else {
+           echo 'Physical Education';
+        }
+    ?></td>
+  <?php $row7 = $grades_grade7[11] ?? null; ?>
+   <td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q1']) && $row7['q1'] !== '') ? '<strong>' . round($row7['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q2']) && $row7['q2'] !== '') ? '<strong>' . round($row7['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q3']) && $row7['q3'] !== '') ? '<strong>' . round($row7['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q4']) && $row7['q4'] !== '') ? '<strong>' . round($row7['q4']) . '</strong>' : '&nbsp;'; ?></td>  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl178 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade8_school) && $grade8_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 11; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade8_school['id']));
+        } else {
+           echo 'Physical Education';
+        }
+    ?></td>
+  <?php $row8 = $grades_grade8[11] ?? null; ?>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q1']) && $row8['q1'] !== '') ? '<strong>' . round($row8['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q2']) && $row8['q2'] !== '') ? '<strong>' . round($row8['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q3']) && $row8['q3'] !== '') ? '<strong>' . round($row8['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q4']) && $row8['q4'] !== '') ? '<strong>' . round($row8['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl178 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade7_school) && $grade7_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 12; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade7_school['id']));
+        } else {
+           echo 'Health';
+        }
+    ?></td>
+  <?php $row7 = $grades_grade7[12] ?? null; ?>
+   <td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q1']) && $row7['q1'] !== '') ? '<strong>' . round($row7['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q2']) && $row7['q2'] !== '') ? '<strong>' . round($row7['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q3']) && $row7['q3'] !== '') ? '<strong>' . round($row7['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q4']) && $row7['q4'] !== '') ? '<strong>' . round($row7['q4']) . '</strong>' : '&nbsp;'; ?></td>  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl178 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade8_school) && $grade8_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 12; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade8_school['id']));
+        } else {
+           echo 'Health';
+        }
+    ?></td>
+  <?php $row8 = $grades_grade8[12] ?? null; ?>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q1']) && $row8['q1'] !== '') ? '<strong>' . round($row8['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q2']) && $row8['q2'] !== '') ? '<strong>' . round($row8['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q3']) && $row8['q3'] !== '') ? '<strong>' . round($row8['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q4']) && $row8['q4'] !== '') ? '<strong>' . round($row8['q4']) . '</strong>' : '&nbsp;'; ?></td>
+  <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl168 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade7_school) && $grade7_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 13; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade7_school['id']));
+        } else {
+           echo 'Eduk. sa Pagpapakatao';
+        }
+    ?></td>
+  <?php $row7 = $grades_grade7[13] ?? null; ?>
+   <td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q1']) && $row7['q1'] !== '') ? '<strong>' . round($row7['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q2']) && $row7['q2'] !== '') ? '<strong>' . round($row7['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q3']) && $row7['q3'] !== '') ? '<strong>' . round($row7['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q4']) && $row7['q4'] !== '') ? '<strong>' . round($row7['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['final_rating']) && $row7['final_rating'] !== '') ? '<strong>' . round($row7['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['remarks']) && $row7['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row7['remarks']) . '</span>' : '&nbsp;'; ?></td>  <td class=xl66></td>
+  <td colspan=14 class=xl168 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade8_school) && $grade8_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 13; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade8_school['id']));
+        } else {
+           echo 'Eduk. sa Pagpapakatao';
+        }
+    ?></td>
+  <?php $row8 = $grades_grade8[13] ?? null; ?>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q1']) && $row8['q1'] !== '') ? '<strong>' . round($row8['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q2']) && $row8['q2'] !== '') ? '<strong>' . round($row8['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q3']) && $row8['q3'] !== '') ? '<strong>' . round($row8['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q4']) && $row8['q4'] !== '') ? '<strong>' . round($row8['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['final_rating']) && $row8['final_rating'] !== '') ? '<strong>' . round($row8['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row8 && isset($row8['remarks']) && $row8['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row8['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl173 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade7_school) && $grade7_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 14; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade7_school['id']));
+        } else {
+           echo '*Arabic Language';
+        }
+    ?></td>
+  <?php $row7 = $grades_grade7[14] ?? null; ?>
+   <td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q1']) && $row7['q1'] !== '') ? '<strong>' . round($row7['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q2']) && $row7['q2'] !== '') ? '<strong>' . round($row7['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q3']) && $row7['q3'] !== '') ? '<strong>' . round($row7['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q4']) && $row7['q4'] !== '') ? '<strong>' . round($row7['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['final_rating']) && $row7['final_rating'] !== '') ? '<strong>' . round($row7['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['remarks']) && $row7['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row7['remarks']) . '</span>' : '&nbsp;'; ?></td>  <td class=xl66></td>
+  <td colspan=14 class=xl173 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade8_school) && $grade8_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 14; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade8_school['id']));
+        } else {
+           echo '*Arabic Language';
+        }
+    ?></td>
+  <?php $row8 = $grades_grade8[14] ?? null; ?>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q1']) && $row8['q1'] !== '') ? '<strong>' . round($row8['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q2']) && $row8['q2'] !== '') ? '<strong>' . round($row8['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q3']) && $row8['q3'] !== '') ? '<strong>' . round($row8['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q4']) && $row8['q4'] !== '') ? '<strong>' . round($row8['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['final_rating']) && $row8['final_rating'] !== '') ? '<strong>' . round($row8['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row8 && isset($row8['remarks']) && $row8['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row8['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=29 style='mso-height-source:userset;height:21.95pt'>
+  <td height=29 class=xl66 style='height:21.95pt'></td>
+  <td colspan=9 class=xl173 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade7_school) && $grade7_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 15; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade7_school['id']));
+        } else {
+           echo '*Islamic Values Education';
+        }
+    ?></td>
+  <?php $row7 = $grades_grade7[15] ?? null; ?>
+   <td class=xl118 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q1']) && $row7['q1'] !== '') ? '<strong>' . round($row7['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl171 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q2']) && $row7['q2'] !== '') ? '<strong>' . round($row7['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q3']) && $row7['q3'] !== '') ? '<strong>' . round($row7['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td class=xl119 style='border-top:none;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['q4']) && $row7['q4'] !== '') ? '<strong>' . round($row7['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['final_rating']) && $row7['final_rating'] !== '') ? '<strong>' . round($row7['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none;vertical-align:middle;text-align:center'><?php echo ($row7 && isset($row7['remarks']) && $row7['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row7['remarks']) . '</span>' : '&nbsp;'; ?></td>  <td class=xl66></td>
+  <td colspan=14 class=xl173 style='border-right:.5pt solid black'><?php
+      // Use the same logic as the preview for subject name mapping
+        if (isset($grade8_school) && $grade8_school) {
+           // Set the subject_id for this cell (replace 1 with the correct subject id for this cell)
+           $subject_id = 15; // Example: 1 for Mother Tongue, 2 for Filipino, etc.
+           echo htmlspecialchars(getSubjectNameForStudent($conn, $subject_id, $student_id, $grade8_school['id']));
+        } else {
+           echo '*Islamic Values Education';
+        }
+    ?></td>
+  <?php $row8 = $grades_grade8[15] ?? null; ?>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q1']) && $row8['q1'] !== '') ? '<strong>' . round($row8['q1']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q2']) && $row8['q2'] !== '') ? '<strong>' . round($row8['q2']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q3']) && $row8['q3'] !== '') ? '<strong>' . round($row8['q3']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl124 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['q4']) && $row8['q4'] !== '') ? '<strong>' . round($row8['q4']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=3 class=xl127 style='border-right:.5pt solid black;border-left:none'><?php echo ($row8 && isset($row8['final_rating']) && $row8['final_rating'] !== '') ? '<strong>' . round($row8['final_rating']) . '</strong>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl105 style='border-right:1.0pt solid black;border-left:none'><?php echo ($row8 && isset($row8['remarks']) && $row8['remarks'] !== '') ? '<span style="font-size:1.2em;font-weight:700">' . format_remark_sheet($row8['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=25 style='mso-height-source:userset;height:18.75pt'>
+  <td height=25 class=xl66 style='height:18.75pt'></td>
+  <td colspan=9 class=xl194 style='border-right:.5pt solid black'>General
+  Average</td>
+  <td class=xl109 style='border-left:none'>&nbsp;</td>
+  <td colspan=2 class=xl186 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl109 style='border-left:none'>&nbsp;</td>
+  <td class=xl109 style='border-left:none'>&nbsp;</td>
+  <td colspan=3 class=xl139 style='border-right:.5pt solid black;border-left:
+  none'><?php echo ($ga7_row && isset($ga7_row['final_rating']) && $ga7_row['final_rating'] !== '') ? '<strong>' . round($ga7_row['final_rating']) . '%</strong>' : (($ga7_final !== null) ? '<strong>' . $ga7_final . '%</strong>' : '&nbsp;'); ?></td>
+  <td colspan=2 class=xl205 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td colspan=14 class=xl194 style='border-right:.5pt solid black'>General
+  Average</td>
+  <td colspan=3 class=xl139 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=2 class=xl139 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=3 class=xl139 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=2 class=xl139 style='border-right:.5pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td colspan=3 class=xl139 style='border-right:.5pt solid black;border-left:
+  none'><?php echo ($ga8_row && isset($ga8_row['final_rating']) && $ga8_row['final_rating'] !== '') ? '<strong>' . round($ga8_row['final_rating']) . '%</strong>' : (($ga8_final !== null) ? '<strong>' . $ga8_final . '%</strong>' : '&nbsp;'); ?></td>
+  <td colspan=2 class=xl207 style='border-right:1.0pt solid black;border-left:
+  none'>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=10 style='mso-height-source:userset;height:3pt'>
+  <td height=10 class=xl66 style='height:3pt'></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=21 style='mso-height-source:userset;height:15.75pt'>
+  <td height=21 class=xl66 style='height:15.75pt'></td>
+  <td colspan=5 class=xl145 style='border-right:.5pt solid black'>Remedial
+  Classes</td>
+  <td colspan="4" class="xl142" style="border-left:
+   none">Conducted from:</td>
+   <td colspan="4" class="xl142" style="border-left:none; vertical-align:middle; text-align:center">
+   <?php
+      $r7_head = $remedial_grade7[0] ?? null;
+      if ($r7_head && !empty($r7_head['conducted_from'])) {
+          echo '<span style="font-size:1.05em;font-weight:700">' . date('m/d/Y', strtotime($r7_head['conducted_from'])) . '</span>';
+      } else {
+          echo '&nbsp;';
+      }
+   ?>
+</td>
+   <td colspan="1" class=xl142 style='border-left:
+   none'>&nbsp;&nbsp;to:</td>
+   <td colspan="5" class="xl142" style="border-right:1.0pt solid black; border-left:none; vertical-align:middle; text-align:center">
+   <?php
+      if ($r7_head && !empty($r7_head['conducted_to'])) {
+          echo '<span style="font-size:1.05em;font-weight:700">' . date('m/d/Y', strtotime($r7_head['conducted_to'])) . '</span>';
+      } else {
+          echo '&nbsp;';
+      }
+   ?>
+</td>                  
+  <td class=xl66></td>
+  <td colspan=5 class=xl145 style='border-right:.5pt solid black'>Remedial
+  Classes</td>
+   <td colspan=9 class=xl142 style='border-left:
+   none'>Conducted from:</td>
+   <td colspan=8 class=xl142 style='border-left:none; vertical-align:middle; text-align:center'>
+   <?php
+      $r8_head = $remedial_grade8[0] ?? null;
+      if ($r8_head && !empty($r8_head['conducted_from'])) {
+          echo '<span style="font-size:1.05em;font-weight:700">' . date('m/d/Y', strtotime($r8_head['conducted_from'])) . '</span>';
+      } else {
+          echo '&nbsp;';
+      }
+   ?>
+</td>
+   <td colspan=2 class=xl142 style='border-left:
+   none'>&nbsp;&nbsp;to:</td>
+   <td colspan=5 class=xl142 style='border-right:1.0pt solid black; border-left:none; vertical-align:middle; text-align:center'>
+   <?php
+      if ($r8_head && !empty($r8_head['conducted_to'])) {
+          echo '<span style="font-size:1.05em;font-weight:700">' . date('m/d/Y', strtotime($r8_head['conducted_to'])) . '</span>';
+      } else {
+          echo '&nbsp;';
+      }
+   ?>
+</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=42 style='mso-height-source:userset;height:31.5pt'>
+  <td height=42 class=xl66 style='height:31.5pt'></td>
+  <td colspan=5 class=xl148 style='border-right:.5pt solid black'>Learning
+  Areas</td>
+  <td colspan=4 class=xl202 style='border-right:.5pt solid black;border-left:
+  none'>Final Rating</td>
+  <td colspan=4 class=xl151 width=105 style='border-right:.5pt solid black;
+  border-left:none;width:79pt'>Remedial Class Mark</td>
+  <td colspan=4 class=xl151 width=97 style='border-right:.5pt solid black;
+  border-left:none;width:73pt'>Recomputed Final Grade</td>
+  <td colspan=2 class=xl199 style='border-right:1.0pt solid black;border-left:
+  none'>Remarks</td>
+  <td class=xl66></td>
+  <td colspan=5 class=xl148 style='border-right:.5pt solid black'>Learning
+  Areas</td>
+  <td colspan=9 class=xl151 width=108 style='border-left:none;width:84pt'>Final
+  Rating</td>
+  <td colspan="7" class="xl151" width="107" style="border-right:.5pt solid black;width:81pt">Remedial Class Mark</td>
+  <td colspan=6 class=xl152 width=107 style='border-right:.5pt solid black;
+  width:81pt'>Recomputed Final Grade</td>
+  <td colspan=2 class=xl199 style='border-right:1.0pt solid black;border-left:
+  none'>Remarks</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <?php $row3 = $remedial_grade7[0] ?? null; ?>
+   <td colspan=5 class=xl203 style='border-right:.5pt solid black'><?php echo ($row3 && isset($row3['learning_area']) && $row3['learning_area'] !== '') ? htmlspecialchars($row3['learning_area']) : '&nbsp;'; ?></td>
+   <td colspan=4 class=xl183 style='border-right:.5pt solid black;border-left: none'><?php echo ($row3 && isset($row3['final_rating']) && $row3['final_rating'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row3['final_rating']) . '</span>' : '&nbsp;'; ?></td>
+   <td colspan=4 class=xl132 style='border-left:none'><?php echo ($row3 && isset($row3['remedial_class_mark']) && $row3['remedial_class_mark'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row3['remedial_class_mark']) . '</span>' : '&nbsp;'; ?></td>
+   <td colspan=4 class=xl183 style='border-right:.5pt solid black;border-left: none'><?php echo ($row3 && isset($row3['recomputed_final_grade']) && $row3['recomputed_final_grade'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row3['recomputed_final_grade']) . '</span>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl181 style='border-right:1.0pt solid black;border-left: none'><?php echo ($row3 && isset($row3['remarks']) && $row3['remarks'] !== '') ? '<span style="font-size:1.1em;font-weight:700">' . format_remark_sheet($row3['remarks']) . '</span>' : '&nbsp;'; ?></td>
+   <?php $row4 = $remedial_grade8[0] ?? null; ?>
+   <td class=xl66></td>
+   <td colspan=5 class=xl131><?php echo ($row4 && isset($row4['learning_area']) && $row4['learning_area'] !== '') ? htmlspecialchars($row4['learning_area']) : '&nbsp;'; ?></td>
+   <td colspan=9 class=xl132 style='border-left:none'><?php echo ($row4 && isset($row4['final_rating']) && $row4['final_rating'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row4['final_rating']) . '</span>' : '&nbsp;'; ?></td>
+   <td colspan=7 class=xl132 style='border-left:none'><?php echo ($row4 && isset($row4['remedial_class_mark']) && $row4['remedial_class_mark'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row4['remedial_class_mark']) . '</span>' : '&nbsp;'; ?></td>
+   <td colspan=6 class=xl132 style='border-left:none'><?php echo ($row4 && isset($row4['recomputed_final_grade']) && $row4['recomputed_final_grade'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row4['recomputed_final_grade']) . '</span>' : '&nbsp;'; ?></td>
+   <td colspan=2 class=xl132 style='border-right:1.0pt solid black;border-left: none'><?php echo ($row4 && isset($row4['remarks']) && $row4['remarks'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . format_remark_sheet($row4['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=28 style='mso-height-source:userset;height:21.0pt'>
+  <td height=28 class=xl66 style='height:21.0pt'></td>
+  <?php $row3 = $remedial_grade7[1] ?? null; ?>
+    <td colspan=5 class=xl203 style='border-right:.5pt solid black'><?php echo ($row3 && isset($row3['learning_area']) && $row3['learning_area'] !== '') ? htmlspecialchars($row3['learning_area']) : '&nbsp;'; ?></td>
+    <td colspan=4 class=xl183 style='border-right:.5pt solid black;border-left: none'><?php echo ($row3 && isset($row3['final_rating']) && $row3['final_rating'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row3['final_rating']) . '</span>' : '&nbsp;'; ?></td>
+    <td colspan=4 class=xl132 style='border-left:none'><?php echo ($row3 && isset($row3['remedial_class_mark']) && $row3['remedial_class_mark'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row3['remedial_class_mark']) . '</span>' : '&nbsp;'; ?></td>
+    <td colspan=4 class=xl183 style='border-right:.5pt solid black;border-left: none'><?php echo ($row3 && isset($row3['recomputed_final_grade']) && $row3['recomputed_final_grade'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row3['recomputed_final_grade']) . '</span>' : '&nbsp;'; ?></td>
+    <td colspan=2 class=xl181 style='border-right:1.0pt solid black;border-left: none'><?php echo ($row3 && isset($row3['remarks']) && $row3['remarks'] !== '') ? '<span style="font-size:1.1em;font-weight:700">' . format_remark_sheet($row3['remarks']) . '</span>' : '&nbsp;'; ?></td>
+    <?php $row4 = $remedial_grade8[1] ?? null; ?>
+    <td class=xl66></td>
+    <td colspan=5 class=xl131><?php echo ($row4 && isset($row4['learning_area']) && $row4['learning_area'] !== '') ? htmlspecialchars($row4['learning_area']) : '&nbsp;'; ?></td>
+    <td colspan=9 class=xl132 style='border-left:none'><?php echo ($row4 && isset($row4['final_rating']) && $row4['final_rating'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row4['final_rating']) . '</span>' : '&nbsp;'; ?></td>
+    <td colspan=7 class=xl132 style='border-left:none'><?php echo ($row4 && isset($row4['remedial_class_mark']) && $row4['remedial_class_mark'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row4['remedial_class_mark']) . '</span>' : '&nbsp;'; ?></td>
+    <td colspan=6 class=xl132 style='border-left:none'><?php echo ($row4 && isset($row4['recomputed_final_grade']) && $row4['recomputed_final_grade'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . round($row4['recomputed_final_grade']) . '</span>' : '&nbsp;'; ?></td>
+    <td colspan=2 class=xl132 style='border-right:1.0pt solid black;border-left: none'><?php echo ($row4 && isset($row4['remarks']) && $row4['remarks'] !== '') ? '<span style="font-size:1.0em;font-weight:700">' . format_remark_sheet($row4['remarks']) . '</span>' : '&nbsp;'; ?></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=30 style='mso-height-source:userset;height:19pt'>
+  <td height=30 class=xl66 style='height:19pt'></td>
+  <td colspan=34 class=xl243>For Transfer Out /Elementary School Completer Only</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <td colspan=49 class=xl253 style='border-right:.5pt solid black'>CERTIFICATION</td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <td class=xl251>&nbsp;</td>
+  <td colspan=8 class=xl256>I CERTIFY that this is a true record of</td>
+  <td colspan=9 class=xl249>&nbsp;</td>
+  <td class=xl254>with LRN</td>
+  <td colspan=6 class=xl249>&nbsp;</td>
+  <td colspan=21 class=xl270>and that he/she is eligible for addmision to
+  Grade</td>
+  <td colspan=2 class=xl255>&nbsp;</td>
+  <td class=xl262>.</td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <td class=xl251>&nbsp;</td>
+  <td colspan=3 class=xl254>School Name:</td>
+  <td colspan=7 class=xl257>&nbsp;</td>
+  <td colspan=3 class=xl259>School ID:</td>
+  <td colspan=4 class=xl258>&nbsp;</td>
+  <td class=xl261>Division:</td>
+  <td colspan=5 class=xl260>&nbsp;</td>
+  <td class=xl261 colspan=12 style='mso-ignore:colspan'>Last School Year
+  Attended:</td>
+  <td class=xl66></td>
+  <td colspan=11 class=xl255>&nbsp;</td>
+  <td class=xl246>&nbsp;</td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:10pt'>
+  <td height=27 class=xl66 style='height:10pt'></td>
+  <td class=xl251>&nbsp;</td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td class=xl246>&nbsp;</td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:10pt'>
+  <td height=27 class=xl66 style='height:10pt'></td>
+  <td class=xl251>&nbsp;</td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl263></td>
+  <td colspan=7 class=xl264>&nbsp;</td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td colspan=10 class=xl249>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td class=xl246>&nbsp;</td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <td class=xl252>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td class=xl265>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td colspan=3 class=xl267>Date</td>
+  <td class=xl248>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td class=xl265>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td colspan=10 class=xl268>Signature of Principal/School Head over Printed
+  Name</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl269>&nbsp;</td>
+  <td class=xl266>&nbsp;</td>
+  <td class=xl266>&nbsp;</td>
+  <td class=xl266>&nbsp;</td>
+  <td class=xl266>&nbsp;</td>
+  <td class=xl266>&nbsp;</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl265 colspan=8 style='mso-ignore:colspan'>(Affix School Seal here)</td>
+  <td class=xl241>&nbsp;</td>
+  <td class=xl241>&nbsp;</td>
+  <td class=xl241>&nbsp;</td>
+  <td class=xl247>&nbsp;</td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=22 style='height:5pt'>
+  <td height=22 class=xl66 style='height:5pt'></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <td colspan=49 class=xl253 style='border-right:.5pt solid black'>CERTIFICATION</td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <td class=xl251>&nbsp;</td>
+  <td colspan=8 class=xl256>I CERTIFY that this is a true record of</td>
+  <td colspan=9 class=xl249>&nbsp;</td>
+  <td class=xl254>with LRN</td>
+  <td colspan=6 class=xl249>&nbsp;</td>
+  <td colspan=21 class=xl270>and that he/she is eligible for addmision to
+  Grade</td>
+  <td colspan=2 class=xl255>&nbsp;</td>
+  <td class=xl262>.</td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <td class=xl251>&nbsp;</td>
+  <td colspan=3 class=xl254>School Name:</td>
+  <td colspan=7 class=xl257>&nbsp;</td>
+  <td colspan=3 class=xl259>School ID:</td>
+  <td colspan=4 class=xl258>&nbsp;</td>
+  <td class=xl261>Division:</td>
+  <td colspan=5 class=xl260>&nbsp;</td>
+  <td class=xl261 colspan=12 style='mso-ignore:colspan'>Last School Year
+  Attended:</td>
+  <td class=xl66></td>
+  <td colspan=11 class=xl255>&nbsp;</td>
+  <td class=xl246>&nbsp;</td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:10pt'>
+  <td height=27 class=xl66 style='height:10pt'></td>
+  <td class=xl251>&nbsp;</td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td class=xl246>&nbsp;</td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:10pt'>
+  <td height=27 class=xl66 style='height:10pt'></td>
+  <td class=xl251>&nbsp;</td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl263></td>
+  <td colspan=7 class=xl264>&nbsp;</td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td colspan=10 class=xl249>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td class=xl246>&nbsp;</td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <td class=xl252>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td class=xl265>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td colspan=3 class=xl267>Date</td>
+  <td class=xl248>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td class=xl265>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td colspan=10 class=xl268>Signature of Principal/School Head over Printed
+  Name</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl269>&nbsp;</td>
+  <td class=xl266>&nbsp;</td>
+  <td class=xl266>&nbsp;</td>
+  <td class=xl266>&nbsp;</td>
+  <td class=xl266>&nbsp;</td>
+  <td class=xl266>&nbsp;</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl265 colspan=8 style='mso-ignore:colspan'>(Affix School Seal here)</td>
+  <td class=xl241>&nbsp;</td>
+  <td class=xl241>&nbsp;</td>
+  <td class=xl241>&nbsp;</td>
+  <td class=xl247>&nbsp;</td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=22 style='height:5pt'>
+  <td height=22 class=xl66 style='height:5pt'></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <td colspan=49 class=xl253 style='border-right:.5pt solid black'>CERTIFICATION</td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <td class=xl251>&nbsp;</td>
+  <td colspan=8 class=xl256>I CERTIFY that this is a true record of</td>
+  <td colspan=9 class=xl249>&nbsp;</td>
+  <td class=xl254>with LRN</td>
+  <td colspan=6 class=xl249>&nbsp;</td>
+  <td colspan=21 class=xl270>and that he/she is eligible for addmision to
+  Grade></td>
+  <td colspan=2 class=xl255>&nbsp;</td>
+  <td class=xl262>.</td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <td class=xl251>&nbsp;</td>
+  <td colspan=3 class=xl254>School Name:</td>
+  <td colspan=7 class=xl257>&nbsp;</td>
+  <td colspan=3 class=xl259>School ID:</td>
+  <td colspan=4 class=xl258>&nbsp;</td>
+  <td class=xl261>Division:</td>
+  <td colspan=5 class=xl260>&nbsp;</td>
+  <td class=xl261 colspan=12 style='mso-ignore:colspan'>Last School Year
+  Attended:</td>
+  <td class=xl66></td>
+  <td colspan=11 class=xl255>&nbsp;</td>
+  <td class=xl246>&nbsp;</td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:10pt'>
+  <td height=27 class=xl66 style='height:10pt'></td>
+  <td class=xl251>&nbsp;</td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl67></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl68></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td class=xl246>&nbsp;</td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:10pt'>
+  <td height=27 class=xl66 style='height:10pt'></td>
+  <td class=xl251>&nbsp;</td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl263></td>
+  <td colspan=7 class=xl264>&nbsp;</td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td class=xl69></td>
+  <td colspan=10 class=xl249>&nbsp;</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td class=xl246>&nbsp;</td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=27 style='mso-height-source:userset;height:20.25pt'>
+  <td height=27 class=xl66 style='height:20.25pt'></td>
+  <td class=xl252>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td class=xl265>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td colspan=3 class=xl267>Date</td>
+  <td class=xl248>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td class=xl265>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td class=xl248>&nbsp;</td>
+  <td colspan=10 class=xl268>Signature of Principal/School Head over Printed
+  Name</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl269>&nbsp;</td>
+  <td class=xl266>&nbsp;</td>
+  <td class=xl266>&nbsp;</td>
+  <td class=xl266>&nbsp;</td>
+  <td class=xl266>&nbsp;</td>
+  <td class=xl266>&nbsp;</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl240>&nbsp;</td>
+  <td class=xl265 colspan=8 style='mso-ignore:colspan'>(Affix School Seal here)</td>
+  <td class=xl241>&nbsp;</td>
+  <td class=xl241>&nbsp;</td>
+  <td class=xl241>&nbsp;</td>
+  <td class=xl247>&nbsp;</td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+ </tr>
+ <tr height=19 style='mso-height-source:userset;height:14.45pt'>
+  <td height=19 class=xl66 style='height:14.45pt'></td>
+  <td class=xl66 colspan=7 style='mso-ignore:colspan'>May add Certification Box
+  if needed</td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td class=xl66></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td></td>
+  <td colspan=9 class=xl272>SFRT Revised
+  2017</td>
+ </tr>
+ <tr class=xl242 height=22 style='mso-height-source:
+  userset;height:16.5pt'>
+  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+ </tr>
+ <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
+  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+ </tr>
+ <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
+  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+ </tr>
+ <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
+  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+ </tr>
+ <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
+  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+ </tr>
+ <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
+  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+ </tr>
+ <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
+  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+ </tr>
+ <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
+  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+ </tr>
+ <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
+  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+ </tr>
+ <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
+  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+ </tr>
+ <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
+  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+  <td class=xl242>&nbsp;</td>
+ </tr>
+ <![if supportMisalignedColumns]>
+ <tr height=0 style='display:none'>
+  <td width=7 style='width:5pt'></td>
+  <td width=41 style='width:31pt'></td>
+  <td width=19 style='width:14pt'></td>
+  <td width=40 style='width:30pt'></td>
+  <td width=37 style='width:28pt'></td>
+  <td width=23 style='width:17pt'></td>
+  <td width=21 style='width:16pt'></td>
+  <td width=41 style='width:31pt'></td>
+  <td width=12 style='width:9pt'></td>
+  <td width=34 style='width:26pt'></td>
+  <td width=33 style='width:25pt'></td>
+  <td width=23 style='width:17pt'></td>
+  <td width=16 style='width:12pt'></td>
+  <td width=33 style='width:25pt'></td>
+  <td width=35 style='width:26pt'></td>
+  <td width=17 style='width:13pt'></td>
+  <td width=17 style='width:13pt'></td>
+  <td width=28 style='width:21pt'></td>
+  <td width=33 style='width:25pt'></td>
+  <td width=56 style='width:42pt'></td>
+  <td width=13 style='width:10pt'></td>
+  <td width=40 style='width:30pt'></td>
+  <td width=19 style='width:14pt'></td>
+  <td width=19 style='width:14pt'></td>
+  <td width=58 style='width:44pt'></td>
+  <td width=21 style='width:16pt'></td>
+  <td width=8 style='width:6pt'></td>
+  <td width=14 style='width:11pt'></td>
+  <td width=31 style='width:23pt'></td>
+  <td width=10 style='width:8pt'></td>
+  <td width=22 style='width:17pt'></td>
+  <td width=10 style='width:8pt'></td>
+  <td width=2 style='width:2pt'></td>
+  <td width=5 style='width:4pt'></td>
+  <td width=6 style='width:5pt'></td>
+  <td width=23 style='width:17pt'></td>
+  <td width=6 style='width:5pt'></td>
+  <td width=12 style='width:9pt'></td>
+  <td width=26 style='width:20pt'></td>
+  <td width=16 style='width:12pt'></td>
+  <td width=12 style='width:9pt'></td>
+  <td width=12 style='width:9pt'></td>
+  <td width=12 style='width:9pt'></td>
+  <td width=24 style='width:18pt'></td>
+  <td width=14 style='width:11pt'></td>
+  <td width=17 style='width:13pt'></td>
+  <td width=24 style='width:18pt'></td>
+  <td width=16 style='width:12pt'></td>
+  <td width=33 style='width:25pt'></td>
+  <td width=52 style='width:39pt'></td>
+  <td width=6 style='width:5pt'></td>
+  <td width=0></td>
+  <td width=0></td>
+  <td width=0></td>
+  <td width=0></td>
+ </tr>
+ <![endif]>
+</table>
+</div>
+
+</body>
+
+</html>

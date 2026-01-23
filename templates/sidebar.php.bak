@@ -1,0 +1,41 @@
+<?php 
+$user = $_SESSION['user']; 
+$current_page = basename($_SERVER['PHP_SELF']); // ✅ Detect current page
+?>
+<div class="d-flex flex-column flex-shrink-0 p-3 sidebar" 
+     style="width: 240px; height:100vh; overflow-y:auto;">
+  <h4 class="mb-4">📘 Menu</h4>
+  <ul class="nav nav-pills flex-column">
+    <li class="nav-item">
+      <a class="nav-link <?= $current_page == 'dashboard.php' ? 'active bg-light text-dark' : 'text-white' ?>" 
+         href="dashboard.php">📊 Dashboard</a>
+    </li>
+    <li class="nav-item">
+      <a class="nav-link <?= $current_page == 'students.php' ? 'active bg-light text-dark' : 'text-white' ?>" 
+         href="students.php">👩‍🎓 Students</a>
+    </li>
+    <li class="nav-item">
+      <a class="nav-link <?= $current_page == 'schools_attended.php' ? 'active bg-light text-dark' : 'text-white' ?>" 
+         href="schools_attended.php">🏫 School History</a>
+    </li>
+    <li class="nav-item">
+      <a class="nav-link <?= $current_page == 'grades.php' ? 'active bg-light text-dark' : 'text-white' ?>" 
+         href="grades.php">📝 Grades Entry</a>
+    </li>
+
+    <?php if ($user['role'] === 'admin'): ?>
+      <li class="nav-item">
+        <a class="nav-link <?= $current_page == 'logs.php' ? 'active bg-light text-dark' : 'text-white' ?>" 
+           href="logs.php">📋 Logs</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link <?= $current_page == 'users.php' ? 'active bg-light text-dark' : 'text-white' ?>" 
+           href="users.php">👥 Users</a>
+      </li>
+    <?php endif; ?>
+
+    <li class="nav-item mt-auto">
+      <a class="nav-link text-danger" href="../logout.php">🚪 Logout</a>
+    </li>
+  </ul>
+</div>

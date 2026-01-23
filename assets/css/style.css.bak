@@ -1,0 +1,52 @@
+:root {
+  --blue-dark: #1E3A8A;
+  --blue-light: #3B82F6;
+  --white: #ffffff;
+}
+
+body {
+  background: #f8f9fa;
+}
+
+.sidebar {
+  height: 100vh;
+  background: var(--blue-dark);
+  color: #fff;
+  overflow-y: auto;          /* ✅ Scrollable when content exceeds viewport */
+}
+
+.sidebar a {
+  color: #fff;
+}
+
+.navbar {
+  background: var(--blue-light);
+}
+
+.btn-primary {
+  background: var(--blue-dark);
+  border: none;
+}
+
+.table thead {
+  background: var(--blue-dark);
+  color: #fff;
+}
+
+/* ✅ Optional: Make scrollbar neat */
+.sidebar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sidebar::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.5);
+  border-radius: 3px;
+}
+
+
+/* Modern flat adjustments */
+.navbar-brand { font-weight: 700; letter-spacing: 0.2px; color: #fff !important; }
+.navbar { box-shadow: 0 2px 6px rgba(0,0,0,0.08); border-radius: 0 0 8px 8px; }
+.main-content { padding: 2rem; background: #f8f9fa; min-height: calc(100vh - 72px); }
+.container-fluid .card { border: none; border-radius: 12px; box-shadow: 0 6px 18px rgba(15,23,42,0.06); }
+.btn-primary { background: var(--blue-light); border: none; }

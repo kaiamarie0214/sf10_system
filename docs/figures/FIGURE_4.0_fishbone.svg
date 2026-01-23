@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="640" viewBox="0 0 1200 640">
+  <style>
+    .title { font: 26px 'Segoe UI', Arial, sans-serif; font-weight:700; fill:#222; }
+    .cat { font:15px 'Segoe UI', Arial, sans-serif; font-weight:700; fill:#fff; }
+    .sub { font:13px 'Segoe UI', Arial, sans-serif; fill:#222; }
+    .spine { stroke:#2f3e46; stroke-width:6; stroke-linecap:round; }
+    .branch { stroke:#6b6f76; stroke-width:3; stroke-linecap:round; }
+    .box { rx:8; ry:8; stroke-width:0; }
+    .problem { fill:#ffffff; stroke:#2f3e46; stroke-width:2; rx:8; ry:8; }
+  </style>
+
+  <!-- Header -->
+  <rect x="20" y="12" rx="10" ry="10" width="1160" height="56" fill="#f7f7f8" stroke="#e3e3e3"/>
+  <text x="600" y="48" class="title" text-anchor="middle">Fishbone Diagram — Causes of Grade Entry Errors / Delays</text>
+
+  <!-- Spine -->
+  <line x1="80" y1="320" x2="980" y2="320" class="spine" />
+  <!-- Problem box -->
+  <rect x="1000" y="288" width="140" height="64" class="problem"/>
+  <text x="1070" y="322" class="cat" text-anchor="middle" fill="#111">Problem</text>
+  <text x="1070" y="342" class="sub" text-anchor="middle">Grade entry errors / delays</text>
+
+  <!-- Left top branches -->
+  <line x1="260" y1="320" x2="200" y2="220" class="branch" />
+  <line x1="320" y1="320" x2="260" y2="220" class="branch" />
+  <rect x="120" y="180" width="200" height="36" rx="10" ry="10" fill="#5eb1ff" class="box"/>
+  <text x="220" y="205" class="cat" text-anchor="middle">People</text>
+  <text x="140" y="225" class="sub">• Inadequate training</text>
+  <text x="140" y="245" class="sub">• High staff workload</text>
+
+  <!-- Left bottom branches -->
+  <line x1="380" y1="320" x2="300" y2="420" class="branch" />
+  <line x1="440" y1="320" x2="360" y2="440" class="branch" />
+  <rect x="240" y="420" width="200" height="36" rx="10" ry="10" fill="#ffd166" class="box"/>
+  <text x="340" y="445" class="cat" text-anchor="middle" fill="#111">Data / Material</text>
+  <text x="260" y="465" class="sub">• Missing/invalid LRN</text>
+  <text x="260" y="485" class="sub">• Legacy grades format</text>
+
+  <!-- Center-left top (Method) -->
+  <line x1="480" y1="320" x2="420" y2="230" class="branch" />
+  <rect x="360" y="188" width="210" height="36" rx="10" ry="10" fill="#9ad3bc" class="box"/>
+  <text x="465" y="213" class="cat" text-anchor="middle" fill="#0b3b2e">Method / Process</text>
+  <text x="380" y="235" class="sub">• Paper-based forms</text>
+  <text x="380" y="255" class="sub">• Manual GA calculation</text>
+
+  <!-- Right top branches (Technology) -->
+  <line x1="640" y1="320" x2="720" y2="220" class="branch" />
+  <line x1="720" y1="320" x2="820" y2="220" class="branch" />
+  <rect x="800" y="180" width="220" height="36" rx="10" ry="10" fill="#8ecae6" class="box"/>
+  <text x="910" y="205" class="cat" text-anchor="middle">Technology / Machine</text>
+  <text x="760" y="225" class="sub">• Intermittent internet</text>
+  <text x="760" y="245" class="sub">• Old PCs / browsers</text>
+
+  <!-- Right bottom branches (Environment / Management) -->
+  <line x1="560" y1="320" x2="640" y2="420" class="branch" />
+  <line x1="700" y1="320" x2="780" y2="440" class="branch" />
+  <rect x="680" y="420" width="220" height="36" rx="10" ry="10" fill="#ffb4a2" class="box"/>
+  <text x="790" y="445" class="cat" text-anchor="middle">Environment / Management</text>
+  <text x="700" y="465" class="sub">• Inconsistent policies</text>
+  <text x="700" y="485" class="sub">• Unmatched subject IDs</text>
+
+  <!-- Footer note -->
+  <text x="600" y="618" font-size="12" text-anchor="middle" fill="#333">FIGURE 4.0 — Fishbone (Ishikawa) diagram showing main cause categories and representative sub-causes</text>
+</svg>
