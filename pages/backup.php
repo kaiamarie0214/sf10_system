@@ -54,6 +54,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $msg = 'Invalid request.';
     } else {
         if (isset($_POST['action']) && $_POST['action'] === 'export') {
+            set_time_limit(0); // Unlimited time for large exports
             $sql = generate_sql_dump($conn);
             // send download headers before including any HTML/template
             header('Content-Type: application/sql');
@@ -64,6 +65,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         if (isset($_POST['action']) && $_POST['action'] === 'import') {
+            set_time_limit(0); // Unlimited time for large imports
             if (!isset($_FILES['sqlfile']) || $_FILES['sqlfile']['error'] !== UPLOAD_ERR_OK) {
                 $msg = 'File upload failed.';
             } else {
@@ -126,6 +128,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         if (isset($_POST['action']) && $_POST['action'] === 'clear') {
+            set_time_limit(0); // Unlimited time for clear operation
             $conn->query("SET FOREIGN_KEY_CHECKS = 0");
             $tables_res = $conn->query("SHOW TABLES");
             $cleared_count = 0;
