@@ -1,4 +1,4 @@
-#### Development model (short)
+### Development model (short)
 
 - Iterative–Incremental (Agile-oriented): deliver in short cycles, gather stakeholder feedback, and refine features.
 
