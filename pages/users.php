@@ -8,10 +8,11 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'get_assignments' && isset($_GET['
     $user_id = (int)$_GET['user_id'];
     
     $result = ['adviser' => null, 'subjects' => []];
+    $school_year_id = $_SESSION['school_year_id'];
     
     // Get adviser assignment
-    $adviser_query = $conn->prepare("SELECT grade_level, section FROM teacher_assignments WHERE teacher_id = ? AND assignment_type = 'adviser'");
-    $adviser_query->bind_param("i", $user_id);
+    $adviser_query = $conn->prepare("SELECT grade_level, section FROM teacher_assignments WHERE teacher_id = ? AND assignment_type = 'adviser' AND school_year_id = ?");
+    $adviser_query->bind_param("ii", $user_id, $school_year_id);
     $adviser_query->execute();
     $adviser_result = $adviser_query->get_result();
     if ($adviser = $adviser_result->fetch_assoc()) {
@@ -21,9 +22,9 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'get_assignments' && isset($_GET['
     // Get subject assignments (grouped by subject and grade)
     $subjects_query = $conn->prepare("SELECT subject_id, grade_level, GROUP_CONCAT(section) as sections 
                                       FROM teacher_assignments 
-                                      WHERE teacher_id = ? AND assignment_type = 'subject' 
+                                      WHERE teacher_id = ? AND assignment_type = 'subject' AND school_year_id = ?
                                       GROUP BY subject_id, grade_level");
-    $subjects_query->bind_param("i", $user_id);
+    $subjects_query->bind_param("ii", $user_id, $school_year_id);
     $subjects_query->execute();
     $subjects_result = $subjects_query->get_result();
     while ($subj = $subjects_result->fetch_assoc()) {
@@ -68,6 +69,45 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'check_adviser') {
     exit;
 }
 
+// AJAX endpoint to get subject details by assignment
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'get_subject_details') {
+    header('Content-Type: application/json');
+    $user_id = (int)$_GET['user_id'];
+    
+    $subjects_with_names = [];
+    
+    // Get subject assignments with customized names
+    $school_year_id = $_SESSION['school_year_id'];
+    $query = $conn->prepare("
+        SELECT 
+            ta.subject_id,
+            ta.grade_level,
+            GROUP_CONCAT(ta.section) as sections,
+            COALESCE(sgg.subject_name, s.subject_name) as subject_name
+        FROM teacher_assignments ta
+        JOIN subjects s ON ta.subject_id = s.id
+        LEFT JOIN subject_grade_groups sgg ON s.id = sgg.subject_id AND ta.grade_level = sgg.grade_level
+        WHERE ta.teacher_id = ? AND ta.assignment_type = 'subject' AND ta.school_year_id = ?
+        GROUP BY ta.subject_id, ta.grade_level, sgg.subject_name, s.subject_name
+        ORDER BY ta.grade_level, s.subject_name
+    ");
+    $query->bind_param("ii", $user_id, $school_year_id);
+    $query->execute();
+    $result = $query->get_result();
+    
+    while ($row = $result->fetch_assoc()) {
+        $subjects_with_names[] = [
+            'subject_id' => $row['subject_id'],
+            'subject_name' => $row['subject_name'],
+            'grade_level' => $row['grade_level'],
+            'sections' => explode(',', $row['sections'])
+        ];
+    }
+    
+    echo json_encode($subjects_with_names);
+    exit;
+}
+
 // Now include header and check permissions for regular page load
 include "../templates/header.php";
 
@@ -80,8 +120,14 @@ if ($user['role'] !== 'admin') {
 $success = "";
 $error = "";
 
-// Handle Add User
-if (isset($_POST['add_user'])) {
+// Check for session success message
+if (isset($_SESSION['success_message'])) {
+    $success = $_SESSION['success_message'];
+    unset($_SESSION['success_message']);
+}
+
+// Handle Add User - REMOVED (now in add_user.php)
+if (false && isset($_POST['add_user'])) {
     try {
         $password = password_hash($_POST['password'], PASSWORD_DEFAULT);
         
@@ -109,11 +155,31 @@ if (isset($_POST['add_user'])) {
                     // adviser_class format: "grade_level|section"
                     list($grade, $section) = explode('|', $_POST['adviser_class']);
                     $grade = (int)$grade;
+                    $school_year_id = $_SESSION['school_year_id'];
                     
-                    $stmt_adv = $conn->prepare("INSERT INTO teacher_assignments (teacher_id, assignment_type, grade_level, section) 
-                                                VALUES (?, 'adviser', ?, ?)");
-                    $stmt_adv->bind_param("iis", $new_user_id, $grade, $section);
+                    $stmt_adv = $conn->prepare("INSERT INTO teacher_assignments (teacher_id, assignment_type, grade_level, section, school_year_id) 
+                                                VALUES (?, 'adviser', ?, ?, ?)");
+                    $stmt_adv->bind_param("iisi", $new_user_id, $grade, $section, $school_year_id);
                     $stmt_adv->execute();
+                }
+                
+                // Add subject assignments if provided
+                if (isset($_POST['subject_assignments']) && is_array($_POST['subject_assignments'])) {
+                    $school_year_id = $_SESSION['school_year_id'];
+                    foreach ($_POST['subject_assignments'] as $assignment) {
+                        if (!empty($assignment['subject_id']) && !empty($assignment['grade']) && !empty($assignment['sections'])) {
+                            $subject_id = (int)$assignment['subject_id'];
+                            $grade = (int)$assignment['grade'];
+                            
+                            // Insert for each selected section
+                            foreach ($assignment['sections'] as $section) {
+                                $stmt_subj = $conn->prepare("INSERT INTO teacher_assignments (teacher_id, assignment_type, subject_id, grade_level, section, school_year_id) 
+                                                            VALUES (?, 'subject', ?, ?, ?, ?)");
+                                $stmt_subj->bind_param("iiisi", $new_user_id, $subject_id, $grade, $section, $school_year_id);
+                                $stmt_subj->execute();
+                            }
+                        }
+                    }
                 }
             }
             
@@ -153,9 +219,11 @@ if (isset($_POST['edit_user'])) {
             
             // If teacher, update assignment
             if ($_POST['role'] === 'teacher') {
+                $school_year_id = $_SESSION['school_year_id'];
+                
                 // Get current adviser assignment from database before making changes
-                $current_adviser_query = $conn->prepare("SELECT grade_level, section FROM teacher_assignments WHERE teacher_id = ? AND assignment_type = 'adviser'");
-                $current_adviser_query->bind_param("i", $user_id);
+                $current_adviser_query = $conn->prepare("SELECT grade_level, section FROM teacher_assignments WHERE teacher_id = ? AND assignment_type = 'adviser' AND school_year_id = ?");
+                $current_adviser_query->bind_param("ii", $user_id, $school_year_id);
                 $current_adviser_query->execute();
                 $current_adviser_result = $current_adviser_query->get_result();
                 $current_adviser = $current_adviser_result->fetch_assoc();
@@ -169,28 +237,33 @@ if (isset($_POST['edit_user'])) {
                     // Keep existing assignment - do nothing
                     // User must explicitly select "Not Assigned" to remove assignment
                 } else {
-                    // Delete existing adviser assignments for this teacher
-                    $conn->query("DELETE FROM teacher_assignments WHERE teacher_id = $user_id AND assignment_type = 'adviser'");
+                    // Delete existing adviser assignments for this teacher in current school year
+                    $stmt_del_adv = $conn->prepare("DELETE FROM teacher_assignments WHERE teacher_id = ? AND assignment_type = 'adviser' AND school_year_id = ?");
+                    $stmt_del_adv->bind_param("ii", $user_id, $school_year_id);
+                    $stmt_del_adv->execute();
                     
                     // Add new adviser assignment if selected
                     if (!empty($new_assignment)) {
                         list($grade, $section) = explode('|', $new_assignment);
                         $grade = (int)$grade;
                         
-                        // First, remove any existing adviser from this section (enforce one adviser per section)
-                        $stmt_del = $conn->prepare("DELETE FROM teacher_assignments WHERE grade_level = ? AND section = ? AND assignment_type = 'adviser'");
-                        $stmt_del->bind_param("is", $grade, $section);
+                        // First, remove any existing adviser from this section (enforce one adviser per section) in current school year
+                        $stmt_del = $conn->prepare("DELETE FROM teacher_assignments WHERE grade_level = ? AND section = ? AND assignment_type = 'adviser' AND school_year_id = ?");
+                        $stmt_del->bind_param("isi", $grade, $section, $school_year_id);
                         $stmt_del->execute();
                         
                         // Now assign the new adviser
-                        $stmt_adv = $conn->prepare("INSERT INTO teacher_assignments (teacher_id, assignment_type, grade_level, section) VALUES (?, 'adviser', ?, ?)");
-                        $stmt_adv->bind_param("iis", $user_id, $grade, $section);
+                        $stmt_adv = $conn->prepare("INSERT INTO teacher_assignments (teacher_id, assignment_type, grade_level, section, school_year_id) VALUES (?, 'adviser', ?, ?, ?)");
+                        $stmt_adv->bind_param("iisi", $user_id, $grade, $section, $school_year_id);
                         $stmt_adv->execute();
                     }
                 }
             } else {
-                // If changed to admin, remove all teacher assignments
-                $conn->query("DELETE FROM teacher_assignments WHERE teacher_id = $user_id");
+                // If changed to admin, remove all teacher assignments for current school year
+                $school_year_id = $_SESSION['school_year_id'];
+                $stmt_del_all = $conn->prepare("DELETE FROM teacher_assignments WHERE teacher_id = ? AND school_year_id = ?");
+                $stmt_del_all->bind_param("ii", $user_id, $school_year_id);
+                $stmt_del_all->execute();
             }
             
             $success = "User updated successfully!";
@@ -223,13 +296,19 @@ if (isset($_POST['delete_user'])) {
 }
 
 // Fetch Users with their assignments
+$current_school_year_id = $_SESSION['school_year_id'] ?? null;
+if ($current_school_year_id) {
+    $sy_filter = "AND ta.school_year_id = " . intval($current_school_year_id);
+} else {
+    $sy_filter = "AND 1=0"; // no school year active — show no assignments
+}
 $users_query = "SELECT u.*, 
                 GROUP_CONCAT(DISTINCT CASE WHEN ta.assignment_type = 'adviser' 
                     THEN CONCAT('Grade ', ta.grade_level, ' - ', ta.section) END) as adviser_info,
                 GROUP_CONCAT(DISTINCT CASE WHEN ta.assignment_type = 'subject' 
                     THEN CONCAT(s.subject_name, ' (G', ta.grade_level, '-', ta.section, ')') END SEPARATOR ', ') as subject_info
                 FROM users u
-                LEFT JOIN teacher_assignments ta ON u.id = ta.teacher_id
+                LEFT JOIN teacher_assignments ta ON u.id = ta.teacher_id $sy_filter
                 LEFT JOIN subjects s ON ta.subject_id = s.id
                 GROUP BY u.id
                 ORDER BY u.created_at DESC";
@@ -245,8 +324,10 @@ $classes_query = "SELECT DISTINCT grade_level, section, school_year, status
                   ORDER BY grade_level, section";
 $classes_result = $conn->query($classes_query);
 $classes_data = [];
-while ($class = $classes_result->fetch_assoc()) {
-    $classes_data[] = $class;
+if ($classes_result) {
+    while ($class = $classes_result->fetch_assoc()) {
+        $classes_data[] = $class;
+    }
 }
 ?>
 
@@ -255,9 +336,9 @@ while ($class = $classes_result->fetch_assoc()) {
         <h2><i class="bi bi-people"></i> Manage Users</h2>
         <p class="subtitle">Manage system users and their permissions</p>
     </div>
-    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addUserModal">
+    <a href="add_user.php" class="btn btn-primary">
         <i class="bi bi-plus-circle"></i> Add New User
-    </button>
+    </a>
 </div>
 
 <?php if (!empty($success)): ?>
@@ -297,8 +378,85 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 
+<style>
+  html, body {
+    overflow: hidden !important;
+    height: 100vh;
+    margin: 0;
+    padding: 0;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+  }
+  #mainContent {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    overflow: hidden;
+    padding-bottom: 0 !important;
+  }
+  footer {
+    flex-shrink: 0;
+    position: sticky;
+    bottom: 0;
+    z-index: 100;
+  }
+  #mainContent > * {
+    flex-shrink: 0;
+  }
+  #usersTableCard {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    margin-bottom: 0 !important;
+  }
+  #usersTableCard .card-body {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    padding-bottom: 1rem !important;
+  }
+  #usersTableCard .table-responsive {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto !important;
+    overflow-x: hidden;
+    margin-bottom: 0;
+  }
+  #usersTable {
+    font-size: 13px;
+    width: 100%;
+    margin-bottom: 0;
+  }
+  #usersTable th, #usersTable td {
+    padding: 6px 8px;
+  }
+  #usersTable thead {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--card-bg, #fff);
+  }
+  
+  /* Mobile responsive - enable horizontal scroll */
+  @media (max-width: 768px) {
+    #usersTableCard .table-responsive {
+      overflow-x: auto !important;
+      -webkit-overflow-scrolling: touch;
+    }
+    #usersTable {
+      min-width: 700px;
+    }
+  }
+</style>
+
 <!-- Users Table -->
-<div class="card">
+<div class="card" id="usersTableCard">
   <div class="card-header d-flex justify-content-between align-items-center">
     <span>
       <i class="bi bi-people"></i> All Users
@@ -362,14 +520,18 @@ document.addEventListener('DOMContentLoaded', function() {
                   <i class="bi bi-three-dots-vertical"></i>
                 </button>
                 <ul class="dropdown-menu dropdown-menu-end shadow" aria-labelledby="actionsDropdown<?= $u['id'] ?>" style="z-index: 1050;">
-                  <li><a class="dropdown-item" href="javascript:void(0)" onclick='editUser(<?= json_encode($u) ?>)'>
+                  <li><a class="dropdown-item" href="view_user.php?id=<?= $u['id'] ?>">
+                    <i class="bi bi-eye text-info me-2"></i>View Details
+                  </a></li>
+                  <li><hr class="dropdown-divider"></li>
+                  <li><a class="dropdown-item" href="edit_user.php?id=<?= $u['id'] ?>">
                     <i class="bi bi-pencil text-warning me-2"></i>Edit User
                   </a></li>
                   <li><hr class="dropdown-divider"></li>
                   <?php if ($u['role'] === 'admin'): ?>
                     <li title="Cannot delete admin. Change role to teacher first.">
                       <a class="dropdown-item text-muted disabled" href="javascript:void(0)" style="cursor: not-allowed; pointer-events: auto;">
-                        <i class="bi bi-trash me-2"></i>Delete User (Disabled)
+                        <i class="bi bi-trash me-2"></i>(Disabled)
                       </a>
                     </li>
                   <?php else: ?>
@@ -467,206 +629,11 @@ document.addEventListener('DOMContentLoaded', function() {
 })();
 </script>
 
-<!-- Add User Modal -->
-<div class="modal fade" id="addUserModal" tabindex="-1">
-  <div class="modal-dialog modal-lg modal-dialog-centered">
-    <div class="modal-content" style="max-height: 90vh; display: flex; flex-direction: column;">
-      <form method="POST" id="addUserForm">
-        <div class="modal-header">
-          <h5 class="modal-title">Add New User</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-        </div>
-        <div class="modal-body" style="overflow-y: auto; max-height: calc(90vh - 120px);">
-          <!-- Basic Info -->
-          <div class="mb-3">
-            <label class="form-label">Full Name <span class="text-danger">*</span></label>
-            <input type="text" name="full_name" class="form-control" autocomplete="off" required>
-          </div>
-          <div class="mb-3">
-            <label class="form-label">Username <span class="text-danger">*</span></label>
-            <input type="text" name="username" class="form-control" autocomplete="off" required>
-          </div>
-          <div class="mb-3">
-            <label class="form-label">Password <span class="text-danger">*</span></label>
-            <input type="password" name="password" class="form-control" autocomplete="new-password" required>
-          </div>
-          <div class="mb-3">
-            <label class="form-label">Role <span class="text-danger">*</span></label>
-            <select name="role" class="form-control" id="roleSelect" onchange="toggleTeacherFields()" required>
-              <option value="">-- Select Role --</option>
-              <option value="admin">Admin</option>
-              <option value="teacher">Teacher</option>
-            </select>
-          </div>
-          
-          <!-- School Information -->
-          <hr>
-          <h6 class="mb-3"><i class="bi bi-building"></i> School Information</h6>
-          <div class="row">
-            <div class="col-md-8 mb-3">
-              <label class="form-label">School Name</label>
-              <input type="text" name="school_name" class="form-control" autocomplete="off">
-            </div>
-            <div class="col-md-4 mb-3">
-              <label class="form-label">School ID</label>
-              <input type="text" name="school_id" class="form-control" autocomplete="off">
-            </div>
-          </div>
-          <div class="row">
-            <div class="col-md-4 mb-3">
-              <label class="form-label">District</label>
-              <input type="text" name="district" class="form-control" autocomplete="off">
-            </div>
-            <div class="col-md-4 mb-3">
-              <label class="form-label">Division</label>
-              <input type="text" name="division" class="form-control" autocomplete="off">
-            </div>
-            <div class="col-md-4 mb-3">
-              <label class="form-label">Region</label>
-              <input type="text" name="region" class="form-control" autocomplete="off">
-            </div>
-          </div>
-          
-          <!-- Teacher Assignments Section -->
-          <div class="teacher-fields d-none">
-            <hr>
-            <h6 class="mb-3"><i class="bi bi-person-badge"></i> Teacher Assignments</h6>
-            
-            <!-- Adviser Assignment -->
-            <div class="card mb-3">
-              <div class="card-body">
-                <div class="form-check mb-3">
-                  <input class="form-check-input" type="checkbox" name="is_adviser" value="1" id="isAdviserCheck" onchange="toggleAdviserFields()">
-                  <label class="form-check-label" for="isAdviserCheck">
-                    <strong>This teacher is a Class Adviser</strong>
-                  </label>
-                </div>
-                <div class="adviser-fields d-none">
-                  <div class="mb-3">
-                    <label class="form-label">Select Class to Advise <span class="text-danger">*</span></label>
-                    <select name="adviser_class" id="adviserClassSelect" class="form-control" onchange="checkExistingAdviserAdd()">
-                      <option value="">-- Select Class --</option>
-                      <?php foreach ($classes_data as $class): ?>
-                        <option value="<?= $class['grade_level'] ?>|<?= htmlspecialchars($class['section']) ?>">
-                          Grade <?= $class['grade_level'] ?> - <?= htmlspecialchars($class['section']) ?>
-                        </option>
-                      <?php endforeach; ?>
-                    </select>
-                    <small class="text-muted">Select from existing classes in the system</small>
-                    <div id="adviserWarningAdd" class="alert alert-warning mt-2" style="display: none; border-left: 4px solid #ff6b6b; background-color: #fff3cd; padding: 10px;">
-                      <i class="bi bi-exclamation-triangle-fill text-danger"></i> 
-                      <strong id="adviserWarningTextAdd"></strong>
-                      <br>
-                      <small>This class already has an adviser. Adding this user will reassign the class and remove the previous adviser.</small>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="submit" name="add_user" class="btn btn-primary">Add User</button>
-        </div>
-      </form>
-    </div>
-  </div>
-</div>
-
-<!-- Edit User Modal -->
-<div class="modal fade" id="editModal" tabindex="-1">
-  <div class="modal-dialog modal-lg" style="margin-top: 80px;">
-    <div class="modal-content">
-      <form method="POST" style="display: flex; flex-direction: column; max-height: 85vh;">
-        <div class="modal-header">
-          <h5 class="modal-title">Edit User</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-        </div>
-        <div class="modal-body" style="overflow-y: auto; flex: 1;">
-          <input type="hidden" name="id" id="editId">
-          
-          <!-- Basic Info -->
-          <div class="mb-3">
-            <label class="form-label">Full Name <span class="text-danger">*</span></label>
-            <input type="text" name="full_name" id="editFullName" class="form-control" autocomplete="off" required>
-          </div>
-          <div class="mb-3">
-            <label class="form-label">Username <span class="text-danger">*</span></label>
-            <input type="text" name="username" id="editUsername" class="form-control" autocomplete="off" required>
-          </div>
-          <div class="mb-3">
-            <label class="form-label">New Password (leave blank to keep current)</label>
-            <input type="password" name="password" class="form-control" autocomplete="new-password" placeholder="Enter new password or leave blank">
-          </div>
-          <div class="mb-3">
-            <label class="form-label">Role <span class="text-danger">*</span></label>
-            <select name="role" id="editRole" class="form-control" required onchange="toggleTeacherFieldsEdit()">
-              <option value="admin">Admin</option>
-              <option value="teacher">Teacher</option>
-            </select>
-          </div>
-          
-          <!-- School Information -->
-          <hr>
-          <h6 class="mb-3"><i class="bi bi-building"></i> School Information</h6>
-          <div class="row">
-            <div class="col-md-8 mb-3">
-              <label class="form-label">School Name</label>
-              <input type="text" name="school_name" id="editSchoolName" class="form-control" autocomplete="off">
-            </div>
-            <div class="col-md-4 mb-3">
-              <label class="form-label">School ID</label>
-              <input type="text" name="school_id" id="editSchoolId" class="form-control" autocomplete="off">
-            </div>
-          </div>
-          <div class="row">
-            <div class="col-md-4 mb-3">
-              <label class="form-label">District</label>
-              <input type="text" name="district" id="editDistrict" class="form-control" autocomplete="off">
-            </div>
-            <div class="col-md-4 mb-3">
-              <label class="form-label">Division</label>
-              <input type="text" name="division" id="editDivision" class="form-control" autocomplete="off">
-            </div>
-            <div class="col-md-4 mb-3">
-              <label class="form-label">Region</label>
-              <input type="text" name="region" id="editRegion" class="form-control" autocomplete="off">
-            </div>
-          </div>
-          
-          <!-- Teacher Assignment (Simple) -->
-          <div class="teacher-fields-edit d-none">
-            <hr>
-            <h6 class="mb-3"><i class="bi bi-person-badge"></i> Teacher Assignment</h6>
-            <div class="mb-3">
-              <label class="form-label">Assigned as Adviser for Class</label>
-              <select name="adviser_class_edit" id="adviserClassSelectEdit" class="form-control" onchange="checkExistingAdviser()">
-                <option value="">-- Not Assigned / None --</option>
-                <?php foreach ($classes_data as $class): ?>
-                  <option value="<?= $class['grade_level'] ?>|<?= htmlspecialchars($class['section']) ?>">
-                    Grade <?= $class['grade_level'] ?> - <?= htmlspecialchars($class['section']) ?>
-                  </option>
-                <?php endforeach; ?>
-              </select>
-              <small class="text-muted">Select a class to assign this teacher as adviser, or leave as "None"</small>
-              <div id="adviserWarning" class="alert alert-warning mt-2" style="display: none; border-left: 4px solid #ff6b6b; background-color: #fff3cd; padding: 10px;">
-                <i class="bi bi-exclamation-triangle-fill text-danger"></i> 
-                <strong id="adviserWarningText"></strong>
-                <br>
-                <small>Click "Save Changes" to reassign this section. The previous teacher will be unassigned.</small>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="submit" name="edit_user" class="btn btn-primary">Save Changes</button>
-        </div>
-      </form>
-    </div>
-  </div>
-</div>
+<!-- Delete Confirmation Form (Hidden) -->
+<form method="POST" id="deleteUserForm" style="display: none;">
+  <input type="hidden" name="id" id="deleteUserId">
+  <input type="hidden" name="delete_user" value="1">
+</form>
 
 <!-- Delete Confirmation Form (Hidden) -->
 <form method="POST" id="deleteUserForm" style="display: none;">
@@ -695,294 +662,6 @@ document.addEventListener('DOMContentLoaded', function() {
 </div>
 
 <script>
-let subjectRowCounter = 0;
-let subjectRowCounterEdit = 0;
-let currentEditUserData = null; // Store current user being edited
-
-// Get subjects data for dropdowns
-const subjectsData = <?= json_encode($subjects->fetch_all(MYSQLI_ASSOC)) ?>;
-
-// Get classes data (grade levels and sections)
-const classesData = <?= json_encode($classes_data) ?>;
-
-// Reset currentEditUserData when modal closes to force fresh load on next open
-document.addEventListener('DOMContentLoaded', function() {
-    const editModal = document.getElementById('editModal');
-    if (editModal) {
-        editModal.addEventListener('hidden.bs.modal', function () {
-            // Reset to force fresh data load next time
-            currentEditUserData = null;
-        });
-    }
-});
-
-function toggleTeacherFields() {
-    const role = document.getElementById('roleSelect').value;
-    document.querySelector('.teacher-fields').classList.toggle('d-none', role !== 'teacher');
-}
-
-function toggleAdviserFields() {
-    const isAdviser = document.getElementById('isAdviserCheck').checked;
-    document.querySelector('.adviser-fields').classList.toggle('d-none', !isAdviser);
-}
-
-// Edit modal functions
-function toggleTeacherFieldsEdit() {
-    const role = document.getElementById('editRole').value;
-    document.querySelector('.teacher-fields-edit').classList.toggle('d-none', role !== 'teacher');
-}
-
-function toggleAdviserFieldsEdit() {
-    const isAdviser = document.getElementById('isAdviserCheckEdit').checked;
-    document.querySelector('.adviser-fields-edit').classList.toggle('d-none', !isAdviser);
-}
-
-// Check if selected section already has an adviser
-function checkExistingAdviser() {
-    const dropdown = document.getElementById('adviserClassSelectEdit');
-    const warningDiv = document.getElementById('adviserWarning');
-    const warningText = document.getElementById('adviserWarningText');
-    const selectedValue = dropdown.value;
-    
-    if (!selectedValue) {
-        // No selection - hide warning
-        warningDiv.style.display = 'none';
-        dropdown.classList.remove('border-danger');
-        return;
-    }
-    
-    const [grade, section] = selectedValue.split('|');
-    const currentUserId = document.getElementById('editId').value;
-    
-    fetch(`users.php?ajax=check_adviser&grade=${grade}&section=${encodeURIComponent(section)}&exclude_user=${currentUserId}`)
-        .then(response => response.json())
-        .then(data => {
-            if (data.has_adviser) {
-                // Show warning with red border
-                dropdown.classList.add('border-danger');
-                warningText.textContent = `Grade ${grade} - ${section} is currently assigned to "${data.adviser_name}".`;
-                warningDiv.style.display = 'block';
-                
-                // Add glow effect
-                dropdown.style.boxShadow = '0 0 10px rgba(255, 107, 107, 0.5)';
-            } else {
-                // No conflict - hide warning
-                dropdown.classList.remove('border-danger');
-                dropdown.style.boxShadow = '';
-                warningDiv.style.display = 'none';
-            }
-        })
-        .catch(error => {
-            console.error('Error checking adviser:', error);
-        });
-}
-
-// Check if selected section already has an adviser (for Add modal)
-function checkExistingAdviserAdd() {
-    const dropdown = document.getElementById('adviserClassSelect');
-    const warningDiv = document.getElementById('adviserWarningAdd');
-    const warningText = document.getElementById('adviserWarningTextAdd');
-    const selectedValue = dropdown.value;
-    
-    if (!selectedValue) {
-        // No selection - hide warning
-        warningDiv.style.display = 'none';
-        dropdown.classList.remove('border-danger');
-        return;
-    }
-    
-    const [grade, section] = selectedValue.split('|');
-    
-    fetch(`users.php?ajax=check_adviser&grade=${grade}&section=${encodeURIComponent(section)}&exclude_user=0`)
-        .then(response => response.json())
-        .then(data => {
-            if (data.has_adviser) {
-                // Show warning with red border
-                dropdown.classList.add('border-danger');
-                warningText.textContent = `Grade ${grade} - ${section} is currently assigned to "${data.adviser_name}".`;
-                warningDiv.style.display = 'block';
-                
-                // Add glow effect
-                dropdown.style.boxShadow = '0 0 10px rgba(255, 107, 107, 0.5)';
-            } else {
-                // No conflict - hide warning
-                dropdown.classList.remove('border-danger');
-                dropdown.style.boxShadow = '';
-                warningDiv.style.display = 'none';
-            }
-        })
-        .catch(error => {
-            console.error('Error checking adviser:', error);
-        });
-}
-
-function addSubjectRowEdit() {
-    subjectRowCounterEdit++;
-    const container = document.getElementById('subjectAssignmentsContainerEdit');
-    
-    const row = document.createElement('div');
-    row.className = 'subject-row border rounded p-3 mb-3 bg-light';
-    row.id = 'subjectRowEdit' + subjectRowCounterEdit;
-    
-    let subjectOptions = '<option value="">-- Select Subject --</option>';
-    subjectsData.forEach(subject => {
-        subjectOptions += `<option value="${subject.id}">${subject.subject_name}</option>`;
-    });
-    
-    let gradeOptions = '<option value="">-- Select Grade --</option>';
-    let uniqueGrades = [...new Set(classesData.map(c => c.grade_level))].sort((a, b) => a - b);
-    uniqueGrades.forEach(grade => {
-        gradeOptions += `<option value="${grade}">Grade ${grade}</option>`;
-    });
-    
-    row.innerHTML = `
-        <div class="row mb-2">
-            <div class="col-md-6">
-                <label class="form-label"><strong>Subject</strong></label>
-                <select name="subject_assignments_edit[${subjectRowCounterEdit}][subject_id]" class="form-control" required>
-                    ${subjectOptions}
-                </select>
-            </div>
-            <div class="col-md-4">
-                <label class="form-label"><strong>Grade Level</strong></label>
-                <select name="subject_assignments_edit[${subjectRowCounterEdit}][grade]" 
-                        id="gradeSelectEdit${subjectRowCounterEdit}"
-                        class="form-control" 
-                        onchange="updateSectionsEdit(${subjectRowCounterEdit})" 
-                        required>
-                    ${gradeOptions}
-                </select>
-            </div>
-            <div class="col-md-2">
-                <label class="form-label">&nbsp;</label>
-                <button type="button" class="btn btn-danger btn-sm w-100" onclick="removeSubjectRowEdit(${subjectRowCounterEdit})">
-                    <i class="bi bi-trash"></i>
-                </button>
-            </div>
-        </div>
-        <div class="row">
-            <div class="col-12">
-                <label class="form-label"><strong>Sections</strong></label>
-                <div id="sectionsContainerEdit${subjectRowCounterEdit}" class="border rounded p-3 bg-white" style="min-height: 60px;">
-                    <p class="text-muted mb-0"><i class="bi bi-arrow-up"></i> Select a grade level first</p>
-                </div>
-            </div>
-        </div>
-    `;
-    
-    container.appendChild(row);
-}
-
-function updateSectionsEdit(rowId) {
-    const gradeSelect = document.getElementById('gradeSelectEdit' + rowId);
-    const sectionsContainer = document.getElementById('sectionsContainerEdit' + rowId);
-    const selectedGrade = gradeSelect.value;
-    
-    if (!selectedGrade) {
-        sectionsContainer.innerHTML = '<p class="text-muted mb-0"><i class="bi bi-arrow-up"></i> Select a grade level first</p>';
-        return;
-    }
-    
-    const gradeSections = classesData.filter(c => c.grade_level == selectedGrade);
-    
-    if (gradeSections.length === 0) {
-        sectionsContainer.innerHTML = '<p class="text-warning mb-0"><i class="bi bi-exclamation-triangle"></i> No sections found for this grade.</p>';
-        return;
-    }
-    
-    let checkboxesHtml = '<div class="d-flex flex-wrap gap-3">';
-    gradeSections.forEach(cls => {
-        const sectionId = `secEdit${rowId}_${cls.section.replace(/\s+/g, '_')}`;
-        checkboxesHtml += `
-            <div class="form-check">
-                <input class="form-check-input" type="checkbox" 
-                       name="subject_assignments_edit[${rowId}][sections][]" 
-                       value="${cls.section}" 
-                       id="${sectionId}">
-                <label class="form-check-label" for="${sectionId}">${cls.section}</label>
-            </div>
-        `;
-    });
-    checkboxesHtml += '</div>';
-    
-    sectionsContainer.innerHTML = checkboxesHtml;
-}
-
-function removeSubjectRowEdit(id) {
-    document.getElementById('subjectRowEdit' + id).remove();
-}
-
-function editUser(user) {
-    // Check if same user (to preserve manual changes)
-    const isSameUser = currentEditUserData && currentEditUserData.id === user.id;
-    
-    // Store user data
-    currentEditUserData = user;
-    
-    // Update basic info from database
-    document.getElementById('editId').value = user.id;
-    document.getElementById('deleteUserId').value = user.id;
-    document.getElementById('editFullName').value = user.full_name;
-    document.getElementById('editUsername').value = user.username;
-    document.getElementById('editRole').value = user.role;
-    document.getElementById('editSchoolName').value = user.school_name || '';
-    document.getElementById('editSchoolId').value = user.school_id || '';
-    document.getElementById('editDistrict').value = user.district || '';
-    document.getElementById('editDivision').value = user.division || '';
-    document.getElementById('editRegion').value = user.region || '';
-    
-    // Clear password field (security)
-    const passwordField = document.querySelector('#editModal input[name="password"]');
-    if (passwordField) passwordField.value = '';
-    
-    // Show/hide teacher fields
-    toggleTeacherFieldsEdit();
-    
-    // Show modal first
-    const modal = new bootstrap.Modal(document.getElementById('editModal'));
-    modal.show();
-    
-    // Load teacher assignment from database (always refresh to show saved values)
-    if (user.role === 'teacher') {
-        fetch(`users.php?ajax=get_assignments&user_id=${user.id}`)
-            .then(response => response.json())
-            .then(data => {
-                console.log('Full AJAX response:', data);
-                const dropdown = document.getElementById('adviserClassSelectEdit');
-                
-                // Debug: Show all available options
-                console.log('Available dropdown options:');
-                for (let i = 0; i < dropdown.options.length; i++) {
-                    console.log(`  [${i}] value="${dropdown.options[i].value}" text="${dropdown.options[i].text}"`);
-                }
-                
-                if (data.adviser) {
-                    const value = data.adviser.grade_level + '|' + data.adviser.section;
-                    console.log('Trying to set dropdown to:', value);
-                    console.log('Grade level type:', typeof data.adviser.grade_level);
-                    console.log('Section type:', typeof data.adviser.section);
-                    
-                    // Use setTimeout to ensure DOM is ready
-                    setTimeout(() => {
-                        dropdown.value = value;
-                        console.log('After setting - dropdown.value is now:', dropdown.value);
-                        console.log('Selected option text:', dropdown.options[dropdown.selectedIndex]?.text);
-                    }, 100);
-                } else {
-                    console.log('No adviser assignment found in database');
-                    dropdown.value = '';
-                }
-            })
-            .catch(error => {
-                console.error('Error loading assignment:', error);
-                document.getElementById('adviserClassSelectEdit').value = '';
-            });
-    } else {
-        // Not a teacher - clear dropdown
-        document.getElementById('adviserClassSelectEdit').value = '';
-    }
-}
-
 // Delete user from table action button
 function deleteUserConfirm(userId, userName) {
     document.getElementById('deleteUserId').value = userId;
@@ -996,10 +675,6 @@ document.getElementById('confirmDeleteUserBtn').addEventListener('click', functi
 });
 </script>
 <?php include '../templates/footer.php'; ?>
-</body>
-</html>
-</body>
-</html>
 
 <style>
 /* Make users search/sort controls stack on small screens like records.php */

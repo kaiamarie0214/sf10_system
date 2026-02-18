@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 include '../includes/db.php';
 
 // Ensure session is started and user is authenticated before processing
@@ -12,150 +12,216 @@ $is_admin = ($user['role'] === 'admin');
 
 // CSRF token
 if (!isset($_SESSION['csrf_token'])) $_SESSION['csrf_token'] = bin2hex(random_bytes(16));
-$msg = '';
+$msg      = '';
+$msg_type = 'info'; // 'success' | 'danger' | 'info'
 
-function generate_sql_dump($conn) {
-    $out = "-- SF10 System Backup\n-- Generated: " . date('Y-m-d H:i:s') . "\n\nSET FOREIGN_KEY_CHECKS=0;\n\n";
-    $tables_res = $conn->query('SHOW TABLES');
-    $tables = [];
-    while ($row = $tables_res->fetch_row()) $tables[] = $row[0];
+// â”€â”€ DB credentials (reuse from db.php globals) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+$db_host = 'localhost';
+$db_user = 'root';
+$db_pass = 'kaia0214';
+$db_name = 'sf10_system';
 
-    foreach ($tables as $table) {
-        $out .= "DROP TABLE IF EXISTS `{$table}`;\n";
-        $create_res = $conn->query("SHOW CREATE TABLE `{$table}`");
-        $create_row = $create_res->fetch_assoc();
-        $out .= $create_row['Create Table'] . ";\n\n";
+$mysqldump = 'C:\\xampp\\mysql\\bin\\mysqldump.exe';
+$mysqlcli  = 'C:\\xampp\\mysql\\bin\\mysql.exe';
 
-        $rows_res = $conn->query("SELECT * FROM `{$table}`");
-        if ($rows_res && $rows_res->num_rows > 0) {
-            $cols = [];
-            $fields_info = $rows_res->fetch_fields();
-            foreach ($fields_info as $f) $cols[] = '`' . $f->name . '`';
-            $cols_list = implode(', ', $cols);
-            while ($r = $rows_res->fetch_assoc()) {
-                $vals = [];
-                foreach ($r as $v) {
-                    if (is_null($v)) $vals[] = 'NULL';
-                    else $vals[] = "'" . $conn->real_escape_string($v) . "'";
-                }
-                $out .= "INSERT INTO `{$table}` ({$cols_list}) VALUES (" . implode(', ', $vals) . ");\n";
-            }
-            $out .= "\n";
-        }
-    }
-    $out .= "SET FOREIGN_KEY_CHECKS=1;\n";
-    return $out;
+// â”€â”€ Helper: build a safe CLI password argument â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+function db_pass_arg($pass) {
+    if ($pass === '') return '';
+    // escape double-quotes inside the password for cmd.exe
+    return '-p' . escapeshellarg($pass);
 }
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if (!$is_admin) {
-        $msg = 'Access denied.';
-    } elseif (empty($_POST['csrf']) || $_POST['csrf'] !== $_SESSION['csrf_token']) {
-        $msg = 'Invalid request.';
-    } else {
-        if (isset($_POST['action']) && $_POST['action'] === 'export') {
-            set_time_limit(0); // Unlimited time for large exports
-            $sql = generate_sql_dump($conn);
-            // send download headers before including any HTML/template
-            header('Content-Type: application/sql');
-            header('Content-Disposition: attachment; filename="sf10_backup_' . date('Ymd_His') . '.sql"');
-            header('Content-Length: ' . strlen($sql));
-            echo $sql;
-            exit();
+// â”€â”€ EXPORT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+if ($_SERVER['REQUEST_METHOD'] === 'POST'
+    && isset($_POST['action']) && $_POST['action'] === 'export'
+    && $is_admin
+    && !empty($_POST['csrf']) && $_POST['csrf'] === $_SESSION['csrf_token']) {
+
+    set_time_limit(300);
+    $filename = 'sf10_backup_' . date('Ymd_His') . '.sql';
+
+    // Write to a temp file then stream it â€” avoids buffering the whole dump in RAM
+    $tmpfile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . $filename;
+
+    $cmd = sprintf(
+        '"%s" -h %s -u %s %s --single-transaction --routines --triggers --add-drop-table %s > "%s" 2>&1',
+        $mysqldump,
+        escapeshellarg($db_host),
+        escapeshellarg($db_user),
+        db_pass_arg($db_pass),
+        escapeshellarg($db_name),
+        $tmpfile
+    );
+    exec($cmd, $out_lines, $ret);
+
+    if ($ret !== 0 || !file_exists($tmpfile) || filesize($tmpfile) === 0) {
+        // Fall back to pure-PHP dump if mysqldump failed
+        $sql  = "-- SF10 System Backup\n-- Generated: " . date('Y-m-d H:i:s') . "\n\n";
+        $sql .= "SET FOREIGN_KEY_CHECKS=0;\n\n";
+
+        $tables_res = $conn->query("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'");
+        while ($trow = $tables_res->fetch_row()) {
+            $tbl = $trow[0];
+            $sql .= "DROP TABLE IF EXISTS `{$tbl}`;\n";
+            $cr  = $conn->query("SHOW CREATE TABLE `{$tbl}`")->fetch_assoc();
+            $sql .= $cr['Create Table'] . ";\n\n";
+
+            $rr = $conn->query("SELECT * FROM `{$tbl}`");
+            if ($rr && $rr->num_rows > 0) {
+                $fi   = $rr->fetch_fields();
+                $cols = implode(', ', array_map(fn($f) => '`'.$f->name.'`', $fi));
+                while ($r = $rr->fetch_assoc()) {
+                    $vals = array_map(fn($v) => is_null($v) ? 'NULL' : "'".$conn->real_escape_string($v)."'", $r);
+                    $sql .= "INSERT INTO `{$tbl}` ({$cols}) VALUES (" . implode(', ', $vals) . ");\n";
+                }
+                $sql .= "\n";
+            }
         }
+        $sql .= "SET FOREIGN_KEY_CHECKS=1;\n";
 
-        if (isset($_POST['action']) && $_POST['action'] === 'import') {
-            set_time_limit(0); // Unlimited time for large imports
-            if (!isset($_FILES['sqlfile']) || $_FILES['sqlfile']['error'] !== UPLOAD_ERR_OK) {
-                $msg = 'File upload failed.';
-            } else {
-                $fname = $_FILES['sqlfile']['name'];
-                if (strtolower(pathinfo($fname, PATHINFO_EXTENSION)) !== 'sql') {
-                    $msg = 'Please upload a .sql file.';
+        header('Content-Type: application/octet-stream');
+        header('Content-Disposition: attachment; filename="' . $filename . '"');
+        header('Content-Length: ' . strlen($sql));
+        echo $sql;
+        exit();
+    }
+
+    header('Content-Type: application/octet-stream');
+    header('Content-Disposition: attachment; filename="' . $filename . '"');
+    header('Content-Length: ' . filesize($tmpfile));
+    readfile($tmpfile);
+    @unlink($tmpfile);
+    exit();
+}
+
+// â”€â”€ IMPORT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+if ($_SERVER['REQUEST_METHOD'] === 'POST'
+    && isset($_POST['action']) && $_POST['action'] === 'import'
+    && $is_admin
+    && !empty($_POST['csrf']) && $_POST['csrf'] === $_SESSION['csrf_token']) {
+
+    set_time_limit(300);
+
+    if (!isset($_FILES['sqlfile']) || $_FILES['sqlfile']['error'] !== UPLOAD_ERR_OK) {
+        $upload_errors = [
+            UPLOAD_ERR_INI_SIZE   => 'File exceeds server upload limit (' . ini_get('upload_max_filesize') . ').',
+            UPLOAD_ERR_FORM_SIZE  => 'File exceeds form size limit.',
+            UPLOAD_ERR_PARTIAL    => 'File was only partially uploaded.',
+            UPLOAD_ERR_NO_FILE    => 'No file was uploaded.',
+            UPLOAD_ERR_NO_TMP_DIR => 'Missing temporary folder.',
+            UPLOAD_ERR_CANT_WRITE => 'Failed to write file to disk.',
+            UPLOAD_ERR_EXTENSION  => 'A PHP extension stopped the upload.',
+        ];
+        $err_code = $_FILES['sqlfile']['error'] ?? UPLOAD_ERR_NO_FILE;
+        $msg      = $upload_errors[$err_code] ?? 'File upload failed (error ' . $err_code . ').';
+        $msg_type = 'danger';
+    } else {
+        $fname = $_FILES['sqlfile']['name'];
+        if (strtolower(pathinfo($fname, PATHINFO_EXTENSION)) !== 'sql') {
+            $msg      = 'Please upload a valid .sql file.';
+            $msg_type = 'danger';
+        } else {
+            $tmpfile = $_FILES['sqlfile']['tmp_name'];
+
+            // Try mysql CLI first (most reliable for large files)
+            $cmd = sprintf(
+                '"%s" -h %s -u %s %s %s < "%s" 2>&1',
+                $mysqlcli,
+                escapeshellarg($db_host),
+                escapeshellarg($db_user),
+                db_pass_arg($db_pass),
+                escapeshellarg($db_name),
+                $tmpfile
+            );
+            exec($cmd, $out_lines, $ret);
+
+            if ($ret !== 0) {
+                // Fall back to PHP multi_query for small files
+                $content = file_get_contents($tmpfile);
+                if ($content === false) {
+                    $msg = 'Unable to read uploaded file.';
+                    $msg_type = 'danger';
                 } else {
-                    $content = file_get_contents($_FILES['sqlfile']['tmp_name']);
-                    if ($content === false) { $msg = 'Unable to read uploaded file.'; }
-                    else {
-                        // run import in chunks to avoid exceeding max_allowed_packet
-                        $max_row = $conn->query("SHOW VARIABLES LIKE 'max_allowed_packet'")->fetch_assoc();
-                        $max_allowed = isset($max_row['Value']) ? (int)$max_row['Value'] : 1048576;
-                        // keep a safety margin
-                        $chunk_limit = max(10240, $max_allowed - 1024);
-                        $buffer = $content;
-                        $import_error = null;
-                        while ($buffer !== '') {
-                            $len = strlen($buffer);
-                            $take = ($len > $chunk_limit) ? $chunk_limit : $len;
-                            $chunk = substr($buffer, 0, $take);
-                            // ensure we cut at a statement boundary (semicolon). If no semicolon in chunk, extend to next semicolon.
-                            $lastSemi = strrpos($chunk, ';');
-                            if ($lastSemi === false) {
-                                $nextSemi = strpos($buffer, ';');
-                                if ($nextSemi !== false) {
-                                    $pos = $nextSemi + 1;
-                                } else {
-                                    // no semicolon at all; send the whole buffer
-                                    $pos = $len;
-                                }
-                            } else {
-                                $pos = $lastSemi + 1;
-                            }
-                            $toSend = substr($buffer, 0, $pos);
-                            $buffer = substr($buffer, $pos);
-
-                            // Trim and skip empty chunks (avoid "Query was empty" errors)
-                            $toSendTrim = trim($toSend);
-                            if ($toSendTrim === '') {
-                                // nothing to send, continue with remaining buffer
-                                continue;
-                            }
-
-                            if (!$conn->multi_query($toSendTrim)) {
-                                $import_error = $conn->error;
-                                break;
-                            }
-                            // consume results
-                            do { if ($res = $conn->store_result()) { $res->free(); } } while ($conn->more_results() && $conn->next_result());
-                        }
-                        if ($import_error) {
-                            $msg = 'Import failed: ' . htmlspecialchars($import_error);
-                        } else {
-                            $msg = 'Import completed successfully.';
+                    $import_error = null;
+                    // Split on statement boundaries, skip comments and empty lines
+                    $statements = array_filter(
+                        array_map('trim', explode(";\n", $content)),
+                        fn($s) => $s !== '' && !preg_match('/^\s*--/', $s)
+                    );
+                    foreach ($statements as $stmt) {
+                        if (trim($stmt) === '') continue;
+                        if (!$conn->query($stmt)) {
+                            $import_error = $conn->error . ' in: ' . substr($stmt, 0, 100);
+                            break;
                         }
                     }
+                    if ($import_error) {
+                        $msg      = 'Import failed: ' . htmlspecialchars($import_error);
+                        $msg_type = 'danger';
+                    } else {
+                        $msg      = 'Import completed successfully (fallback mode).';
+                        $msg_type = 'success';
+                    }
                 }
+            } else {
+                $msg      = 'Import completed successfully.';
+                $msg_type = 'success';
             }
-        }
 
-        if (isset($_POST['action']) && $_POST['action'] === 'clear') {
-            set_time_limit(0); // Unlimited time for clear operation
-            $conn->query("SET FOREIGN_KEY_CHECKS = 0");
-            $tables_res = $conn->query("SHOW TABLES");
-            $cleared_count = 0;
-            $teachers_deleted = 0;
-            
-            while ($row = $tables_res->fetch_row()) {
-                $table = $row[0];
-                if ($table === 'users') {
-                    // Delete only teachers from users table
-                    $conn->query("DELETE FROM `users` WHERE `role` = 'teacher'");
-                    $teachers_deleted = $conn->affected_rows;
-                } elseif ($table !== 'subjects') {
-                    // Truncate all other tables except subjects
-                    $conn->query("TRUNCATE TABLE `{$table}`");
-                    $cleared_count++;
+            // Update session with active school year after import
+            if ($msg_type === 'success') {
+                $sy = $conn->query("SELECT id, year FROM school_years WHERE is_active = 1 ORDER BY year DESC LIMIT 1");
+                if ($sy && $sy->num_rows > 0) {
+                    $r = $sy->fetch_assoc();
+                    $_SESSION['school_year_id']     = $r['id'];
+                    $_SESSION['school_year']         = $r['year'];
+                    $_SESSION['school_year_status']  = 'active';
                 }
             }
-            $conn->query("SET FOREIGN_KEY_CHECKS = 1");
-            $msg = "Database cleared successfully. ($cleared_count tables truncated, $teachers_deleted teacher accounts removed, admin accounts and subjects preserved)";
         }
     }
 }
 
-// Now safe to include header and render page (no more header() calls expected)
-include '../templates/header.php';
+// â”€â”€ CLEAR â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+if ($_SERVER['REQUEST_METHOD'] === 'POST'
+    && isset($_POST['action']) && $_POST['action'] === 'clear'
+    && $is_admin
+    && !empty($_POST['csrf']) && $_POST['csrf'] === $_SESSION['csrf_token']) {
 
+    set_time_limit(300);
+    $conn->query("SET FOREIGN_KEY_CHECKS = 0");
+
+    $tables_res      = $conn->query("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'");
+    $cleared_count   = 0;
+    $teachers_deleted = 0;
+
+    while ($row = $tables_res->fetch_row()) {
+        $table = $row[0];
+        if ($table === 'users') {
+            $conn->query("DELETE FROM `users` WHERE `role` = 'teacher'");
+            $teachers_deleted = $conn->affected_rows;
+        } elseif ($table !== 'subjects') {
+            $conn->query("TRUNCATE TABLE `{$table}`");
+            $cleared_count++;
+        }
+    }
+    $conn->query("SET FOREIGN_KEY_CHECKS = 1");
+
+    $_SESSION['school_year_id']    = null;
+    $_SESSION['school_year']        = null;
+    $_SESSION['school_year_status'] = null;
+
+    // Redirect to school years so admin sets up a new school year immediately
+    $_SESSION['flash_msg']  = "Database cleared. ({$cleared_count} tables truncated, {$teachers_deleted} teacher accounts removed. Admin accounts &amp; subjects preserved.)";
+    $_SESSION['flash_type'] = 'success';
+    header('Location: school_years.php');
+    exit();
+}
+
+// Now safe to include header (no more header() calls)
+include '../templates/header.php';
 ?>
+
 <div class="page-header">
     <h2><i class="bi bi-cloud-arrow-down-fill"></i> Backup / Restore Database</h2>
     <p class="subtitle">Export a SQL dump or upload a .sql file to restore (admin only)</p>
@@ -164,7 +230,7 @@ include '../templates/header.php';
 <div class="card mb-4">
     <div class="card-body">
         <?php if ($msg): ?>
-            <div class="alert alert-info"><?= htmlspecialchars($msg) ?></div>
+            <div class="alert alert-<?= htmlspecialchars($msg_type) ?>"><?= $msg ?></div>
         <?php endif; ?>
 
         <div class="mb-4">
@@ -185,30 +251,30 @@ include '../templates/header.php';
                     <label for="sqlfile" class="form-label">Upload .sql file to import</label>
                     <input type="file" name="sqlfile" id="sqlfile" accept=".sql" class="form-control" required>
                 </div>
-                                <div class="mb-3">
-                                        <button type="button" id="importBtn" class="btn btn-danger"><i class="bi bi-upload"></i> Import SQL</button>
-                                </div>
-                
-                                <!-- Confirm Import Modal -->
-                                <div class="modal fade" id="confirmImportModal" tabindex="-1" aria-labelledby="confirmImportModalLabel" aria-hidden="true" style="margin-top: 80px;">
-                                    <div class="modal-dialog">
-                                        <div class="modal-content">
-                                            <div class="modal-header bg-danger text-white">
-                                                <h5 class="modal-title" id="confirmImportModalLabel"><i class="bi bi-exclamation-triangle"></i> Confirm Import</h5>
-                                                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
-                                            </div>
-                                            <div class="modal-body">
-                                                <p>Restoring will overwrite existing data. This action is irreversible.</p>
-                                                <p><strong>Selected file:</strong> <span id="selectedSqlFile">(none)</span></p>
-                                                <div class="alert alert-warning"><i class="bi bi-exclamation-triangle-fill"></i> Make sure you have a backup before proceeding.</div>
-                                            </div>
-                                            <div class="modal-footer">
-                                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                                                <button type="button" id="confirmImportBtn" class="btn btn-danger">Yes, Import</button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
+                <div class="mb-3">
+                    <button type="button" id="importBtn" class="btn btn-danger"><i class="bi bi-upload"></i> Import SQL</button>
+                </div>
+
+                <!-- Confirm Import Modal -->
+                <div class="modal fade" id="confirmImportModal" tabindex="-1" aria-labelledby="confirmImportModalLabel" aria-hidden="true" style="margin-top: 80px;">
+                    <div class="modal-dialog">
+                        <div class="modal-content">
+                            <div class="modal-header bg-danger text-white">
+                                <h5 class="modal-title" id="confirmImportModalLabel"><i class="bi bi-exclamation-triangle"></i> Confirm Import</h5>
+                                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                            </div>
+                            <div class="modal-body">
+                                <p>Restoring will overwrite existing data. This action is irreversible.</p>
+                                <p><strong>Selected file:</strong> <span id="selectedSqlFile">(none)</span></p>
+                                <div class="alert alert-warning"><i class="bi bi-exclamation-triangle-fill"></i> Make sure you have a backup before proceeding.</div>
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                                <button type="button" id="confirmImportBtn" class="btn btn-danger">Yes, Import</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </form>
         </div>
 
@@ -223,7 +289,7 @@ include '../templates/header.php';
                     <p class="text-muted small">This will truncate all tables EXCEPT <code>subjects</code>, and remove all <code>teacher</code> accounts from the <code>users</code> table (keeping <code>admin</code> accounts). This action is irreversible.</p>
                     <button type="button" id="clearBtn" class="btn btn-outline-danger"><i class="bi bi-trash"></i> Clear Database</button>
                 </div>
-                
+
                 <!-- Confirm Clear Modal -->
                 <div class="modal fade" id="confirmClearModal" tabindex="-1" aria-labelledby="confirmClearModalLabel" aria-hidden="true" style="margin-top: 80px;">
                     <div class="modal-dialog">
@@ -245,19 +311,16 @@ include '../templates/header.php';
                 </div>
             </form>
         </div>
+
         <script>
         (function(){
             var exportForm = document.getElementById('exportForm');
             var exportBtn = document.getElementById('exportBtn');
-            
             if (exportForm && exportBtn) {
                 exportForm.addEventListener('submit', function() {
-                    // Provide some feedback without blocking the whole UI
                     var originalHtml = exportBtn.innerHTML;
                     exportBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Preparing...';
                     exportBtn.disabled = true;
-                    
-                    // Re-enable after a few seconds since we can't easily detect download completion
                     setTimeout(function() {
                         exportBtn.innerHTML = originalHtml;
                         exportBtn.disabled = false;
@@ -280,35 +343,27 @@ include '../templates/header.php';
                 return confirmModal;
             }
 
-            if (importForm) {
-                // When import button clicked, show confirmation modal
-                if (importBtn) {
-                    importBtn.addEventListener('click', function(e){
-                        e.preventDefault();
-                        var fname = sqlFileInput && sqlFileInput.files && sqlFileInput.files.length ? sqlFileInput.files[0].name : '(no file selected)';
-                        if (selectedSqlFileSpan) selectedSqlFileSpan.textContent = fname;
-                        var m = ensureModal();
-                        if (m) m.show();
-                        else alert('Modal not ready yet. Please try again in a moment.');
-                    });
-                }
+            if (importBtn) {
+                importBtn.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    var fname = sqlFileInput && sqlFileInput.files && sqlFileInput.files.length ? sqlFileInput.files[0].name : '(no file selected)';
+                    if (selectedSqlFileSpan) selectedSqlFileSpan.textContent = fname;
+                    var m = ensureModal();
+                    if (m) m.show();
+                    else alert('Modal not ready yet. Please try again in a moment.');
+                });
+            }
 
-                // When confirm in modal clicked, submit form
-                if (confirmImportBtn) {
-                    confirmImportBtn.addEventListener('click', function(){
-                        // Hide modal first
-                        var m = bootstrap.Modal.getInstance(confirmModalEl);
-                        if (m) m.hide();
-                        
-                        // Update main button state
-                        if (importBtn) {
-                            importBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Importing...';
-                            importBtn.disabled = true;
-                        }
-                        
-                        importForm.submit();
-                    });
-                }
+            if (confirmImportBtn) {
+                confirmImportBtn.addEventListener('click', function() {
+                    var m = bootstrap.Modal.getInstance(confirmModalEl);
+                    if (m) m.hide();
+                    if (importBtn) {
+                        importBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Importing...';
+                        importBtn.disabled = true;
+                    }
+                    importForm.submit();
+                });
             }
 
             var clearForm = document.getElementById('clearForm');
@@ -316,24 +371,21 @@ include '../templates/header.php';
             var confirmClearModalEl = document.getElementById('confirmClearModal');
             var confirmClearBtn = document.getElementById('confirmClearBtn');
 
-            if (clearForm && clearBtn && confirmClearModalEl) {
+            if (clearBtn && confirmClearModalEl) {
                 clearBtn.addEventListener('click', function(e) {
                     e.preventDefault();
-                    var m = new bootstrap.Modal(confirmClearModalEl);
-                    m.show();
+                    new bootstrap.Modal(confirmClearModalEl).show();
                 });
+            }
 
-                if (confirmClearBtn) {
-                    confirmClearBtn.addEventListener('click', function() {
-                        var m = bootstrap.Modal.getInstance(confirmClearModalEl);
-                        if (m) m.hide();
-                        
-                        clearBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Clearing...';
-                        clearBtn.disabled = true;
-                        
-                        clearForm.submit();
-                    });
-                }
+            if (confirmClearBtn) {
+                confirmClearBtn.addEventListener('click', function() {
+                    var m = bootstrap.Modal.getInstance(confirmClearModalEl);
+                    if (m) m.hide();
+                    clearBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Clearing...';
+                    clearBtn.disabled = true;
+                    clearForm.submit();
+                });
             }
         })();
         </script>

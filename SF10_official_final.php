@@ -303,6 +303,16 @@ function fnSetActiveSheet(iSh)
  window.g_iIEVer=fnGetIEVer();
  if (window.g_iIEVer>=4)
   fnBuildFrameset();
+
+ // Function to close the tab or navigate back
+ function closeTab() {
+  if (window.opener) {
+   window.opener.focus();
+   window.close();
+  } else {
+   window.close();
+  }
+ }
 //-->
 </script>
 <![endif]><!--[if gte mso 9]><xml>

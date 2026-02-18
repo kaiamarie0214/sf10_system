@@ -35,18 +35,42 @@ $subjects_result = $conn->query($subjects_query);
 </div>
 
 <?php if (isset($success_message)): ?>
-<div class="alert alert-success alert-dismissible fade show" role="alert">
+<div class="alert alert-success alert-dismissible fade show" role="alert" id="successAlert">
     <i class="bi bi-check-circle"></i> <?= $success_message ?>
     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
 </div>
 <?php endif; ?>
 
 <?php if (isset($error_message)): ?>
-<div class="alert alert-danger alert-dismissible fade show" role="alert">
-    <i class="bi bi-exclamation-triangle"></i> <?= $error_message ?>
+<div class="alert alert-danger alert-dismissible fade show" role="alert" id="errorAlert">
+    <i class="bi bi-exclamation-circle"></i> <?= $error_message ?>
     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
 </div>
 <?php endif; ?>
+
+<script>
+// Auto-dismiss alerts with fade out
+document.addEventListener('DOMContentLoaded', function() {
+    const successAlert = document.getElementById('successAlert');
+    const errorAlert = document.getElementById('errorAlert');
+    
+    if (successAlert) {
+        setTimeout(() => {
+            successAlert.style.transition = 'opacity 0.5s ease-out';
+            successAlert.style.opacity = '0';
+            setTimeout(() => successAlert.remove(), 500);
+        }, 5000);
+    }
+    
+    if (errorAlert) {
+        setTimeout(() => {
+            errorAlert.style.transition = 'opacity 0.5s ease-out';
+            errorAlert.style.opacity = '0';
+            setTimeout(() => errorAlert.remove(), 500);
+        }, 7000);
+    }
+});
+</script>
 
 <div class="row">
     <!-- Add Subject Form -->

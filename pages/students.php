@@ -1,8 +1,4 @@
 <?php
-// Backward-compatibility shim after renaming records.php to students.php
-require __DIR__ . '/students.php';
-return;
-
 session_start();
 require_once "../includes/db.php";
 require_once "../includes/logger.php";
@@ -389,11 +385,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['action'])) {
 
     if ($check_lrn->num_rows > 0) {
         $_SESSION['error_message'] = "Student with LRN '{$_POST['lrn']}' already exists. Please check the student's record.";
-        header("Location: records.php");
+        header("Location: students.php");
         exit();
     } elseif ($check_name->num_rows > 0) {
         $_SESSION['error_message'] = "A student with a similar name already exists: '{$_POST['first_name']} {$middle_name} {$_POST['last_name']}'. Please verify the student information or check if they are already enrolled.";
-        header("Location: records.php");
+        header("Location: students.php");
         exit();
     } else {
         $stmt = $conn->prepare("INSERT INTO students 
@@ -433,7 +429,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
   $current_user = $_SESSION['user'] ?? null;
   if (!$current_user || ($current_user['role'] ?? '') !== 'admin') {
     $_SESSION['error_message'] = 'You do not have permission to add school records.';
-    header('Location: records.php');
+    header('Location: students.php');
     exit();
   }
   // Build school_year range from the two year inputs
@@ -476,7 +472,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
       $_SESSION['error_message'] = "Failed to add school record.";
     }
   }
-  header("Location: records.php");
+  header("Location: students.php");
   exit();
 }
 
@@ -525,7 +521,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             $_SESSION['error_message'] = "Failed to update school record.";
         }
     }
-    header("Location: records.php");
+    header("Location: students.php");
     exit();
 }
 
@@ -548,6 +544,7 @@ if (isset($_SESSION['error_message'])) {
 // Get all students with their current grade/section from schools_attended
 // Order by: students without school records first (NEW), then by creation date
 $sort = $_GET['sort'] ?? '';
+$selected_school_year = $_SESSION['school_year'] ?? '';
 
 $order_clause = "has_record ASC, s.created_at DESC"; // default
 switch ($sort) {
@@ -576,23 +573,94 @@ switch ($sort) {
     break;
 }
 
-$students_query = "SELECT s.*, 
-           sa.id as school_attended_id,
-           sa.grade_level, 
-           sa.section,
-           sa.school_year,
-           CASE WHEN sa.id IS NULL THEN 0 ELSE 1 END as has_record
-           FROM students s
-           LEFT JOIN schools_attended sa ON s.id = sa.student_id 
-           AND sa.id = (
-             SELECT id 
-             FROM schools_attended 
-             WHERE student_id = s.id
-             ORDER BY grade_level DESC, school_year DESC
-             LIMIT 1
-           )
-           ORDER BY {$order_clause}";
-$students = $conn->query($students_query);
+$selected_school_year_escaped = $conn->real_escape_string($selected_school_year);
+
+// Always load all students first (same source as grade_entry), then attach preferred school record
+$students = [];
+$students_result = $conn->query("SELECT * FROM students ORDER BY last_name ASC, first_name ASC");
+if ($students_result) {
+  while ($row = $students_result->fetch_assoc()) {
+    $row['school_attended_id'] = null;
+    $row['grade_level'] = null;
+    $row['section'] = null;
+    $row['school_year'] = null;
+    $row['has_record'] = 0;
+    $students[] = $row;
+  }
+}
+
+if (!empty($students)) {
+  $student_ids = array_map(function($s) { return (int)$s['id']; }, $students);
+  $in_ids = implode(',', $student_ids);
+
+  $records_query = "SELECT sa.*
+                    FROM schools_attended sa
+                    WHERE sa.student_id IN ($in_ids)
+                    ORDER BY
+                      sa.student_id ASC,
+                      CASE WHEN sa.school_year = '{$selected_school_year_escaped}' THEN 0 ELSE 1 END ASC,
+                      sa.id DESC";
+  $records_result = $conn->query($records_query);
+
+  $preferred_record_by_student = [];
+  if ($records_result) {
+    while ($rec = $records_result->fetch_assoc()) {
+      $sid = (int)$rec['student_id'];
+      if (!isset($preferred_record_by_student[$sid])) {
+        $preferred_record_by_student[$sid] = $rec;
+      }
+    }
+  }
+
+  foreach ($students as &$student_row) {
+    $sid = (int)$student_row['id'];
+    if (isset($preferred_record_by_student[$sid])) {
+      $rec = $preferred_record_by_student[$sid];
+      $student_row['school_attended_id'] = $rec['id'];
+      $student_row['grade_level'] = $rec['grade_level'];
+      $student_row['section'] = $rec['section'];
+      $student_row['school_year'] = $rec['school_year'];
+      $student_row['has_record'] = 1;
+      $student_row['is_transfer'] = $rec['is_transfer'] ?? 0;
+      $student_row['transfer_quarter'] = $rec['transfer_quarter'] ?? null;
+    }
+  }
+  unset($student_row);
+}
+
+// Keep server-side default ordering behavior using the same sort option
+if (!empty($students)) {
+  usort($students, function($a, $b) use ($sort) {
+    $aName = strtolower(trim(($a['last_name'] ?? '') . ' ' . ($a['first_name'] ?? '')));
+    $bName = strtolower(trim(($b['last_name'] ?? '') . ' ' . ($b['first_name'] ?? '')));
+    $aGrade = (int)($a['grade_level'] ?? 0);
+    $bGrade = (int)($b['grade_level'] ?? 0);
+    $aGender = strtolower($a['gender'] ?? '');
+    $bGender = strtolower($b['gender'] ?? '');
+    $aHas = (int)($a['has_record'] ?? 0);
+    $bHas = (int)($b['has_record'] ?? 0);
+
+    switch ($sort) {
+      case 'name-asc':
+        return $aName <=> $bName;
+      case 'name-desc':
+        return $bName <=> $aName;
+      case 'grade-asc':
+        return [$aGrade, strtolower((string)($a['section'] ?? ''))] <=> [$bGrade, strtolower((string)($b['section'] ?? ''))];
+      case 'grade-desc':
+        return [$bGrade, strtolower((string)($b['section'] ?? ''))] <=> [$aGrade, strtolower((string)($a['section'] ?? ''))];
+      case 'gender-male':
+        return [($aGender === 'male' ? 0 : 1), $aName] <=> [($bGender === 'male' ? 0 : 1), $bName];
+      case 'gender-female':
+        return [($aGender === 'female' ? 0 : 1), $aName] <=> [($bGender === 'female' ? 0 : 1), $bName];
+      default:
+        // students without records first, then newest by created_at if available, then name
+        $aCreated = strtotime($a['created_at'] ?? '') ?: 0;
+        $bCreated = strtotime($b['created_at'] ?? '') ?: 0;
+        return [$aHas, -$aCreated, $aName] <=> [$bHas, -$bCreated, $bName];
+    }
+  });
+}
 
 $is_admin = $user['role'] === 'admin';
 ?>
@@ -645,133 +713,9 @@ document.addEventListener('DOMContentLoaded', function() {
         }, 7000);
     }
 });
-
-// Sorting dropdown behavior: navigate with `sort` param
-document.addEventListener('DOMContentLoaded', function() {
-  const sortSelect = document.getElementById('sortStudents');
-  if (sortSelect) {
-    sortSelect.addEventListener('change', function() {
-      const val = this.value;
-      const url = new URL(window.location.href);
-      if (val === 'all') {
-        url.searchParams.delete('sort');
-      } else {
-        url.searchParams.set('sort', val);
-      }
-      window.location.href = url.toString();
-    });
-  }
-
-  // Filter options 'filter-male' and 'filter-female' can be handled client-side after load
-  const studentSearch = document.getElementById('studentSearch');
-  const clearBtn = document.getElementById('clearStudentSearch');
-  if (studentSearch) {
-    studentSearch.addEventListener('input', function() {
-      clearBtn.style.display = this.value ? 'inline-block' : 'none';
-      const q = this.value.toLowerCase();
-      document.querySelectorAll('.student-row').forEach(row => {
-        const name = row.getAttribute('data-name').toLowerCase();
-        const lrn = row.getAttribute('data-lrn').toLowerCase();
-        row.style.display = (name.includes(q) || lrn.includes(q)) ? '' : 'none';
-      });
-      updateStudentCount();
-    });
-    if (clearBtn) {
-      clearBtn.addEventListener('click', function() {
-        studentSearch.value = '';
-        this.style.display = 'none';
-        document.querySelectorAll('.student-row').forEach(row => row.style.display = '');
-        updateStudentCount();
-      });
-    }
-  }
-  // Apply initial filter if URL contains filter param
-  const params = new URL(window.location.href).searchParams;
-  const initialSort = params.get('sort');
-  if (initialSort === 'filter-male' || initialSort === 'filter-female') {
-    const wanted = initialSort === 'filter-male' ? 'male' : 'female';
-    document.querySelectorAll('.student-row').forEach(row => {
-      const gender = (row.getAttribute('data-gender') || '').toLowerCase();
-      row.style.display = gender === wanted ? '' : 'none';
-    });
-    // set select value visually
-    const sortSelect2 = document.getElementById('sortStudents');
-    if (sortSelect2) sortSelect2.value = initialSort;
-    updateStudentCount();
-  }
-  // initial count
-  updateStudentCount();
-});
-</script>
-
-<script>
-function updateStudentCount() {
-  const rows = Array.from(document.querySelectorAll('.student-row'));
-  const visible = rows.filter(r => r.style.display !== 'none').length;
-  const badge = document.getElementById('studentCount');
-  if (badge) badge.textContent = visible;
-}
 </script>
 
 <style>
-  /* Flexbox layout for scrollable table - Override everything */
-  html, body {
-    overflow: hidden !important;
-    height: 100vh !important;
-    margin: 0 !important;
-    padding: 0 !important;
-  }
-  body {
-    display: flex !important;
-    flex-direction: column !important;
-  }
-  .main-wrapper#mainContent,
-  #mainContent {
-    display: flex !important;
-    flex-direction: column !important;
-    flex: 1 1 auto !important;
-    overflow: hidden !important;
-    padding-bottom: 0 !important;
-    min-height: 0 !important;
-    max-height: 100vh !important;
-  }
-  footer {
-    flex-shrink: 0 !important;
-    position: sticky !important;
-    bottom: 0 !important;
-    z-index: 100 !important;
-  }
-  #mainContent > *,
-  .main-wrapper#mainContent > * {
-    flex-shrink: 0 !important;
-  }
-  #mainContent .card:last-of-type,
-  .main-wrapper#mainContent .card:last-of-type {
-    flex: 1 1 auto !important;
-    display: flex !important;
-    flex-direction: column !important;
-    min-height: 0 !important;
-    overflow: hidden !important;
-    margin-bottom: 0 !important;
-  }
-  #mainContent .card:last-of-type .card-body,
-  .main-wrapper#mainContent .card:last-of-type .card-body {
-    flex: 1 1 auto !important;
-    display: flex !important;
-    flex-direction: column !important;
-    min-height: 0 !important;
-    overflow: hidden !important;
-    padding: 0 !important;
-  }
-  #mainContent .card:last-of-type .table-responsive,
-  .main-wrapper#mainContent .card:last-of-type .table-responsive {
-    flex: 1 1 auto !important;
-    min-height: 0 !important;
-    overflow-y: auto !important;
-    overflow-x: auto !important;
-    margin-bottom: 0 !important;
-    -webkit-overflow-scrolling: touch !important;
-  }
   #studentsTable {
     font-size: 13px;
     width: 100%;
@@ -787,10 +731,17 @@ function updateStudentCount() {
     z-index: 10;
     background: var(--card-bg, #fff);
   }
+  #studentsTableScroll {
+    max-height: calc(100vh - 280px);
+    min-height: 300px;
+    overflow-y: auto;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
 </style>
 
 <!-- Students List -->
-<div class="card" style="overflow: hidden; border-radius: 0.375rem;">
+<div class="card" style="border-radius: 0.375rem; margin-bottom: 1rem;">
   <div class="card-header d-flex justify-content-between align-items-center">
     <span>
       <i class="bi bi-people"></i> All Students
@@ -817,8 +768,8 @@ function updateStudentCount() {
       </div>
     </div>
   </div>
-  <div class="card-body" style="height: 500px; overflow: hidden; padding: 0; border-radius: 0 0 0.375rem 0.375rem;">
-    <div class="table-responsive" style="height: 100%; overflow-y: auto; overflow-x: auto; border-radius: 0 0 0.375rem 0.375rem;">
+  <div class="card-body" style="padding: 0;">
+    <div id="studentsTableScroll">
       <table class="table table-hover mb-0" id="studentsTable">
         <thead>
           <tr>
@@ -831,13 +782,13 @@ function updateStudentCount() {
           </tr>
         </thead>
         <tbody>
-          <?php while($student = $students->fetch_assoc()): 
+          <?php foreach($students as $student): 
             $isNew = ($student['has_record'] == 0); // Student has no school records
           ?>
           <tr class="student-row" 
               style="cursor: pointer;" 
               data-student-id="<?= $student['id'] ?>"
-              data-name="<?= htmlspecialchars($student['first_name'] . ' ' . $student['last_name']) ?>"
+              data-name="<?= htmlspecialchars($student['first_name'] . ' ' . $student['last_name'] . '|' . $student['last_name'] . ', ' . $student['first_name']) ?>"
               data-lrn="<?= htmlspecialchars($student['lrn']) ?>"
               data-grade="<?= $student['grade_level'] ?? '0' ?>"
               data-gender="<?= htmlspecialchars($student['gender']) ?>"
@@ -847,6 +798,10 @@ function updateStudentCount() {
               <i class="bi bi-person-circle"></i> <?= htmlspecialchars(strtoupper($student['last_name'] . ', ' . $student['first_name'])) ?>
               <?php if ($isNew): ?>
                 <span class="badge bg-success ms-2">NEW</span>
+              <?php elseif (!empty($student['is_transfer'])): ?>
+                <span class="badge bg-danger ms-2" style="font-size:0.75em; padding: 4px 8px;">
+                  <i class="bi bi-arrow-left-right"></i> TRANSFEREE<?= !empty($student['transfer_quarter']) ? ' - Q' . $student['transfer_quarter'] : '' ?>
+                </span>
               <?php endif; ?>
             </td>
             <td><?= htmlspecialchars($student['gender']) ?></td>
@@ -864,6 +819,7 @@ function updateStudentCount() {
                   <i class="bi bi-three-dots-vertical"></i>
                 </button>
                 <ul class="dropdown-menu dropdown-menu-end shadow" aria-labelledby="actionsDropdown<?= $student['id'] ?>">
+                  <?php if ($is_admin): ?>
                   <li>
                     <a class="dropdown-item" href="enter_grades.php?student_id=<?= $student['id'] ?>&student_name=<?= urlencode(strtoupper($student['last_name'] . ', ' . $student['first_name'])) ?><?= $student['school_attended_id'] ? '&school_attended_id=' . $student['school_attended_id'] : '' ?>">
                       <i class="bi bi-clipboard-check text-info me-2"></i>View Grades
@@ -873,11 +829,14 @@ function updateStudentCount() {
                   <li><a class="dropdown-item" href="grade_progression.php?student_id=<?= $student['id'] ?>">
                     <i class="bi bi-plus-circle text-success me-2"></i>Add Record
                   </a></li>
+                  <?php endif; ?>
+                  <?php if ($is_admin): ?>
                   <li>
                     <a class="dropdown-item" href="sf10_preview.php?student_id=<?= $student['id'] ?>">
                       <i class="bi bi-file-earmark-pdf text-success me-2"></i>Preview SF10
                     </a>
                   </li>
+                  <?php endif; ?>
                   <li><a class="dropdown-item" href="view_student.php?id=<?= $student['id'] ?>">
                     <i class="bi bi-eye text-primary me-2"></i>View Details
                   </a></li>
@@ -894,7 +853,7 @@ function updateStudentCount() {
               </div>
             </td>
           </tr>
-          <?php endwhile; ?>
+          <?php endforeach; ?>
         </tbody>
       </table>
     </div>
@@ -1063,12 +1022,19 @@ function updateStudentCount() {
     const clearSearchBtn = document.getElementById('clearStudentSearch');
     const sortSelect = document.getElementById('sortStudents');
     const tableBody = document.querySelector('#studentsTable tbody');
-    const studentRows = Array.from(tableBody.querySelectorAll('.student-row'));
+  const studentRows = Array.from(tableBody.querySelectorAll('.student-row'));
     const studentCount = document.getElementById('studentCount');
+
+  if (!tableBody || !studentCount) {
+    return;
+  }
+
+  const initialRows = [...studentRows];
     
     // Function to update visible student count
-    function updateStudentCount() {
-        const visibleRows = studentRows.filter(row => row.style.display !== 'none');
+    function updateStudentCount(rowsForCount) {
+      const sourceRows = Array.isArray(rowsForCount) ? rowsForCount : initialRows;
+      const visibleRows = sourceRows.filter(row => row.style.display !== 'none');
         const count = visibleRows.length;
         
         studentCount.textContent = count;
@@ -1080,8 +1046,77 @@ function updateStudentCount() {
         }
     }
     
-    // Initialize count on page load
-    updateStudentCount();
+    function normalizeName(value) {
+      return (value || '').toLowerCase().trim();
+    }
+
+    function applyTableState() {
+      const sortType = sortSelect ? sortSelect.value : 'all';
+      const searchTerm = normalizeName(searchInput ? searchInput.value : '');
+      // In 'all' mode: no search filter, no gender filter — show everything
+      const effectiveSearchTerm = (sortType === 'all') ? '' : searchTerm;
+      const rows = [...initialRows];
+
+      // For 'all' mode: force-show every row first, then re-append in original order and return
+      if (sortType === 'all') {
+        initialRows.forEach(row => {
+          row.style.display = '';
+          tableBody.appendChild(row);
+        });
+        updateStudentCount(initialRows);
+        return;
+      }
+
+      // Always restore order first for deterministic rendering
+      if (sortType === 'name-asc') {
+        rows.sort((a, b) => a.getAttribute('data-name').localeCompare(b.getAttribute('data-name')));
+      } else if (sortType === 'name-desc') {
+        rows.sort((a, b) => b.getAttribute('data-name').localeCompare(a.getAttribute('data-name')));
+      } else if (sortType === 'grade-asc') {
+        rows.sort((a, b) => parseInt(a.getAttribute('data-grade') || '0', 10) - parseInt(b.getAttribute('data-grade') || '0', 10));
+      } else if (sortType === 'grade-desc') {
+        rows.sort((a, b) => parseInt(b.getAttribute('data-grade') || '0', 10) - parseInt(a.getAttribute('data-grade') || '0', 10));
+      } else if (sortType === 'gender-male') {
+        rows.sort((a, b) => {
+          const aGender = (a.getAttribute('data-gender') || '').toLowerCase();
+          const bGender = (b.getAttribute('data-gender') || '').toLowerCase();
+          if (aGender === 'male' && bGender !== 'male') return -1;
+          if (aGender !== 'male' && bGender === 'male') return 1;
+          return a.getAttribute('data-name').localeCompare(b.getAttribute('data-name'));
+        });
+      } else if (sortType === 'gender-female') {
+        rows.sort((a, b) => {
+          const aGender = (a.getAttribute('data-gender') || '').toLowerCase();
+          const bGender = (b.getAttribute('data-gender') || '').toLowerCase();
+          if (aGender === 'female' && bGender !== 'female') return -1;
+          if (aGender !== 'female' && bGender === 'female') return 1;
+          return a.getAttribute('data-name').localeCompare(b.getAttribute('data-name'));
+        });
+      }
+
+      rows.forEach(row => tableBody.appendChild(row));
+
+      rows.forEach(row => {
+        const rowGender = (row.getAttribute('data-gender') || '').toLowerCase();
+        const name = normalizeName(row.getAttribute('data-name'));
+        const lrn = normalizeName(row.getAttribute('data-lrn'));
+            const matchesSearch = !effectiveSearchTerm || name.includes(effectiveSearchTerm) || lrn.includes(effectiveSearchTerm);
+
+        let matchesFilter = true;
+        if (sortType === 'filter-male') {
+          matchesFilter = rowGender === 'male';
+        } else if (sortType === 'filter-female') {
+          matchesFilter = rowGender === 'female';
+        }
+
+        row.style.display = (matchesSearch && matchesFilter) ? '' : 'none';
+      });
+
+      updateStudentCount(rows);
+    }
+
+    // Initialize count + render on page load
+    applyTableState();
     
     document.addEventListener('click', function(e) {
         const row = e.target.closest('tr.student-row');
@@ -1099,103 +1134,29 @@ function updateStudentCount() {
     });
     
     // Search and Sort functionality
-    
     if (searchInput && clearSearchBtn) {
         // Show/hide clear button based on input value
         searchInput.addEventListener('input', function() {
-            const searchTerm = this.value.toLowerCase().trim();
             clearSearchBtn.style.display = this.value ? 'block' : 'none';
-            
-            studentRows.forEach(row => {
-                const name = row.getAttribute('data-name').toLowerCase();
-                const lrn = row.getAttribute('data-lrn').toLowerCase();
-                
-                if (name.includes(searchTerm) || lrn.includes(searchTerm)) {
-                    row.style.display = '';
-                } else {
-                    row.style.display = 'none';
-                }
-            });
-            
-            updateStudentCount();
+        applyTableState();
         });
         
         // Clear search input when X button is clicked
         clearSearchBtn.addEventListener('click', function() {
             searchInput.value = '';
             clearSearchBtn.style.display = 'none';
-            studentRows.forEach(row => row.style.display = '');
-            updateStudentCount();
+        applyTableState();
         });
     }
     
     // Sort functionality
     if (sortSelect) {
         sortSelect.addEventListener('change', function() {
-            const sortType = this.value;
-            let sortedRows = [...studentRows];
-            
-            // Handle filtering first
-            if (sortType === 'filter-male') {
-                // Show only male students
-                studentRows.forEach(row => {
-                    const gender = row.getAttribute('data-gender');
-                    row.style.display = gender === 'Male' ? '' : 'none';
-                });
-                updateStudentCount();
-                return;
-            } else if (sortType === 'filter-female') {
-                // Show only female students
-                studentRows.forEach(row => {
-                    const gender = row.getAttribute('data-gender');
-                    row.style.display = gender === 'Female' ? '' : 'none';
-                });
-                updateStudentCount();
-                return;
-            } else if (sortType === 'all') {
-                // Show all students
-                studentRows.forEach(row => row.style.display = '');
-                updateStudentCount();
-                return;
-            }
-            
-            // Show all rows before sorting
-            studentRows.forEach(row => row.style.display = '');
-            
-            sortedRows.sort((a, b) => {
-                // Always keep NEW students at top
-                const aIsNew = a.getAttribute('data-new') === '1';
-                const bIsNew = b.getAttribute('data-new') === '1';
-                
-                if (aIsNew && !bIsNew) return -1;
-                if (!aIsNew && bIsNew) return 1;
-                
-                // Then sort by selected criteria
-                if (sortType === 'name-asc') {
-                    return a.getAttribute('data-name').localeCompare(b.getAttribute('data-name'));
-                } else if (sortType === 'name-desc') {
-                    return b.getAttribute('data-name').localeCompare(a.getAttribute('data-name'));
-                } else if (sortType === 'grade-asc') {
-                    return parseInt(a.getAttribute('data-grade')) - parseInt(b.getAttribute('data-grade'));
-                } else if (sortType === 'grade-desc') {
-                    return parseInt(b.getAttribute('data-grade')) - parseInt(a.getAttribute('data-grade'));
-                } else if (sortType === 'gender-male') {
-                    const aGender = a.getAttribute('data-gender');
-                    const bGender = b.getAttribute('data-gender');
-                    if (aGender === 'Male' && bGender !== 'Male') return -1;
-                    if (aGender !== 'Male' && bGender === 'Male') return 1;
-                    return a.getAttribute('data-name').localeCompare(b.getAttribute('data-name'));
-                } else if (sortType === 'gender-female') {
-                    const aGender = a.getAttribute('data-gender');
-                    const bGender = b.getAttribute('data-gender');
-                    if (aGender === 'Female' && bGender !== 'Female') return -1;
-                    if (aGender !== 'Female' && bGender === 'Female') return 1;
-                    return a.getAttribute('data-name').localeCompare(b.getAttribute('data-name'));
-                }
-            });
-            
-            // Re-append rows in sorted order
-            sortedRows.forEach(row => tableBody.appendChild(row));
+        if (this.value === 'all' && searchInput && clearSearchBtn) {
+          searchInput.value = '';
+          clearSearchBtn.style.display = 'none';
+        }
+        applyTableState();
         });
     }
 })();
@@ -1297,7 +1258,7 @@ function updateStudentCount() {
 <div class="modal fade" id="addSchoolRecordModal" tabindex="-1">
   <div class="modal-dialog modal-lg" style="margin-top: 80px;">
     <div class="modal-content">
-      <form method="POST" action="records.php" style="display: flex; flex-direction: column; max-height: 85vh;">
+      <form method="POST" action="students.php" style="display: flex; flex-direction: column; max-height: 85vh;">
         <div class="modal-header">
           <h5 class="modal-title"><i class="bi bi-plus-circle"></i> Add School Attended Record</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
@@ -1400,7 +1361,7 @@ function updateStudentCount() {
 <div class="modal fade" id="editSchoolRecordModal" tabindex="-1">
   <div class="modal-dialog modal-lg" style="margin-top: 80px;">
     <div class="modal-content">
-      <form method="POST" action="records.php" style="display: flex; flex-direction: column; max-height: 85vh;">
+      <form method="POST" action="students.php" style="display: flex; flex-direction: column; max-height: 85vh;">
         <div class="modal-header">
           <h5 class="modal-title"><i class="bi bi-pencil"></i> Edit School Attended Record</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
@@ -1522,7 +1483,7 @@ function openQuarterLockModal() {
 }
 
 function loadQuarterLocks(studentId) {
-  fetch(`records.php?action=get_all_quarter_locks&student_id=${studentId}`)
+  fetch(`students.php?action=get_all_quarter_locks&student_id=${studentId}`)
     .then(response => response.json())
     .then(data => {
       if (data.success) {
@@ -1571,7 +1532,7 @@ function toggleQuarterLock(quarter) {
   formData.append('quarter', quarter);
   formData.append('locked', locked);
   
-  fetch('records.php', {
+  fetch('students.php', {
     method: 'POST',
     body: formData
   })
@@ -1604,7 +1565,7 @@ function setAutoLockTime(quarter) {
   formData.append('quarter', quarter);
   formData.append('auto_lock_time', autoLockTime);
   
-  fetch('records.php', {
+  fetch('students.php', {
     method: 'POST',
     body: formData
   })
@@ -1644,7 +1605,7 @@ function setAutoUnlockTime(quarter) {
   formData.append('quarter', quarter);
   formData.append('auto_unlock_time', autoUnlockTime);
   
-  fetch('records.php', {
+  fetch('students.php', {
     method: 'POST',
     body: formData
   })
@@ -1682,7 +1643,7 @@ function deleteStudent(id, name) {
 
 document.getElementById('confirmDeleteBtn').addEventListener('click', function() {
   if (deleteStudentId) {
-    fetch(`records.php?action=delete&id=${deleteStudentId}`)
+    fetch(`students.php?action=delete&id=${deleteStudentId}`)
       .then(response => response.json())
       .then(data => {
         if (data.success) {
@@ -1719,7 +1680,7 @@ function loadSectionsForGrade(gradeLevel) {
   sectionsList.innerHTML = '';
   
   // Fetch sections from database
-  fetch(`records.php?action=get_sections&grade=${gradeLevel}`)
+  fetch(`students.php?action=get_sections&grade=${gradeLevel}`)
     .then(response => {
       console.log('Response status:', response.status);
       return response.json();
@@ -1812,7 +1773,7 @@ let deleteRecordId = null;
 
 document.getElementById('confirmDeleteRecordBtn').addEventListener('click', function() {
   if (deleteRecordId) {
-    fetch(`records.php?action=delete_school_record&id=${deleteRecordId}`)
+    fetch(`students.php?action=delete_school_record&id=${deleteRecordId}`)
       .then(response => response.json())
       .then(data => {
         if (data.success) {

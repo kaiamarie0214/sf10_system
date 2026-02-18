@@ -1813,28 +1813,5 @@ body.dark-theme [id^="sectionsContainerEdit"] {
   border-color: #444 !important;
 }
 
-/* Unsaved/Saved Grade Indicators */
-.grade-input-unsaved {
-  border-color: #dc3545 !important;
-  box-shadow: 0 0 0 0.2rem rgba(220, 53, 69, 0.25) !important;
-  background-color: rgba(220, 53, 69, 0.05) !important;
-}
-
-.grade-input-saved {
-  border-color: #28a745 !important;
-  box-shadow: 0 0 0 0.2rem rgba(40, 167, 69, 0.15) !important;
-  background-color: rgba(40, 167, 69, 0.03) !important;
-}
-
-body.dark-theme .grade-input-unsaved {
-  border-color: #e74c3c !important;
-  box-shadow: 0 0 0 0.2rem rgba(231, 76, 60, 0.3) !important;
-  background-color: rgba(231, 76, 60, 0.08) !important;
-}
-
-body.dark-theme .grade-input-saved {
-  border-color: #2ecc71 !important;
-  box-shadow: 0 0 0 0.2rem rgba(46, 204, 113, 0.2) !important;
-  background-color: rgba(46, 204, 113, 0.05) !important;
-}
+/* Grade indicators removed - using autosave instead */
 

@@ -8,6 +8,8 @@ if (!isset($_SESSION['user'])) {
 require_once dirname(__DIR__, 1) . '/includes/db.php';
 
 $student = null;
+// Sheet001 covers Grade 1-4 slots (left+right columns per row)
+// With mid-year transfers, a single grade can occupy TWO slots (originating + receiving)
 $grade1_school = null;
 $grade2_school = null;
 $grade3_school = null;
@@ -22,21 +24,36 @@ if (isset($_GET['student_id'])) {
    $result = $stmt->get_result();
    $student = $result->fetch_assoc();
 
-   // Helper function for fetching school record for a grade
-   function fetch_grade_school($conn, $student_id, $grade_label, $grade_num) {
-      $stmt = $conn->prepare('SELECT * FROM schools_attended WHERE student_id = ? AND (grade_level = ? OR grade_level = ?) ORDER BY id ASC LIMIT 1');
+   // Fetch ALL school records for a grade level (supports mid-year transfer: multiple records per grade)
+   function fetch_all_grade_schools($conn, $student_id, $grade_label, $grade_num) {
+      $stmt = $conn->prepare('SELECT * FROM schools_attended WHERE student_id = ? AND (grade_level = ? OR grade_level = ?) ORDER BY id ASC');
       $stmt->bind_param('iss', $student_id, $grade_label, $grade_num);
       $stmt->execute();
       $result = $stmt->get_result();
-      return $result->fetch_assoc();
+      return $result->fetch_all(MYSQLI_ASSOC);
    }
 
-   $grade1_school = fetch_grade_school($conn, $student_id, 'Grade 1', '1');
-   $grade2_school = fetch_grade_school($conn, $student_id, 'Grade 2', '2');
-   $grade3_school = fetch_grade_school($conn, $student_id, 'Grade 3', '3');
-   $grade4_school = fetch_grade_school($conn, $student_id, 'Grade 4', '4');
-   $grade5_school = fetch_grade_school($conn, $student_id, 'Grade 5', '5');
-   $grade6_school = fetch_grade_school($conn, $student_id, 'Grade 6', '6');
+   // Keep backward-compatible single fetch (returns first record)
+   function fetch_grade_school($conn, $student_id, $grade_label, $grade_num) {
+      $all = fetch_all_grade_schools($conn, $student_id, $grade_label, $grade_num);
+      return $all[0] ?? null;
+   }
+
+   // Fetch all records per grade for Grades 1-6
+   $grade1_schools_all = fetch_all_grade_schools($conn, $student_id, 'Grade 1', '1');
+   $grade2_schools_all = fetch_all_grade_schools($conn, $student_id, 'Grade 2', '2');
+   $grade3_schools_all = fetch_all_grade_schools($conn, $student_id, 'Grade 3', '3');
+   $grade4_schools_all = fetch_all_grade_schools($conn, $student_id, 'Grade 4', '4');
+   $grade5_schools_all = fetch_all_grade_schools($conn, $student_id, 'Grade 5', '5');
+   $grade6_schools_all = fetch_all_grade_schools($conn, $student_id, 'Grade 6', '6');
+
+   // Single-record backward-compat (first record per grade)
+   $grade1_school = $grade1_schools_all[0] ?? null;
+   $grade2_school = $grade2_schools_all[0] ?? null;
+   $grade3_school = $grade3_schools_all[0] ?? null;
+   $grade4_school = $grade4_schools_all[0] ?? null;
+   $grade5_school = $grade5_schools_all[0] ?? null;
+   $grade6_school = $grade6_schools_all[0] ?? null;
 
 // Function to get subject name for a specific student, matching preview logic
 function getSubjectNameForStudent($conn, $subject_id, $student_id, $school_attended_id) {
@@ -102,24 +119,41 @@ function getSubjectNameForStudent($conn, $subject_id, $student_id, $school_atten
 ?>
 
 <?php
-// Build a robust per-school (grade-level) latest-grade map for this student
-// This fetches the latest row per subject+quarter for every school the student attended
-$grades_by_grade = [];
+// =============================================================================
+// Build a robust per-school (grade-level) latest-grade map for this student.
+// Supports mid-year transfers: a student may have TWO schools_attended records
+// for the SAME grade level (originating + receiving school). Both records are
+// stored in $grades_by_grade[$grade_num] as an array indexed 0,1,...
+// =============================================================================
+$grades_by_grade = []; // [ grade_num => [ [school=>, grades=>], [school=>, grades=>], ... ] ]
 if (isset($student_id)) {
-   $stmt_sch = $conn->prepare('SELECT * FROM schools_attended WHERE student_id = ? ORDER BY grade_level ASC, school_year ASC');
+   $stmt_sch = $conn->prepare('SELECT * FROM schools_attended WHERE student_id = ? ORDER BY grade_level ASC, id ASC');
    $stmt_sch->bind_param('i', $student_id);
    $stmt_sch->execute();
    $schools_res = $stmt_sch->get_result();
 
-   $latest_query = "SELECT g.*\n                       FROM grades g\n                       INNER JOIN (\n                           SELECT subject_id, quarter, MAX(id) as max_id\n                           FROM grades\n                           WHERE student_id = ?\n                           AND school_attended_id = ?\n                           GROUP BY subject_id, quarter\n                       ) AS latest ON g.id = latest.max_id\n                       ORDER BY g.subject_id, g.quarter";
+   $latest_query = "SELECT g.*
+                       FROM grades g
+                       INNER JOIN (
+                           SELECT subject_id, quarter, MAX(id) as max_id
+                           FROM grades
+                           WHERE student_id = ?
+                           AND school_attended_id = ?
+                           GROUP BY subject_id, quarter
+                       ) AS latest ON g.id = latest.max_id
+                       ORDER BY g.subject_id, g.quarter";
 
    while ($school_row = $schools_res->fetch_assoc()) {
-      // Try to extract numeric grade (e.g., 'Grade 1' -> 1), fallback to school id
+      // Extract numeric grade (e.g., 'Grade 1' -> 1), fallback to school id
       $grade_label = $school_row['grade_level'];
       preg_match('/(\d+)/', $grade_label, $m);
       $grade_num = isset($m[1]) ? intval($m[1]) : (int)$school_row['id'];
 
-      $grades_by_grade[$grade_num] = ['school' => $school_row, 'grades' => []];
+      if (!isset($grades_by_grade[$grade_num])) {
+         $grades_by_grade[$grade_num] = [];
+      }
+
+      $slot_entry = ['school' => $school_row, 'grades' => []];
 
       $stmt_g = $conn->prepare($latest_query);
       $stmt_g->bind_param('ii', $student_id, $school_row['id']);
@@ -127,56 +161,150 @@ if (isset($student_id)) {
       $res_g = $stmt_g->get_result();
       while ($r = $res_g->fetch_assoc()) {
          $sid = (int)$r['subject_id'];
-         $q = (int)$r['quarter'];
-         if (!isset($grades_by_grade[$grade_num]['grades'][$sid])) {
-            $grades_by_grade[$grade_num]['grades'][$sid] = ['q1' => '', 'q2' => '', 'q3' => '', 'q4' => '', 'final_rating' => '', 'remarks' => ''];
+         $q   = (int)$r['quarter'];
+         if (!isset($slot_entry['grades'][$sid])) {
+            $slot_entry['grades'][$sid] = ['q1' => '', 'q2' => '', 'q3' => '', 'q4' => '', 'final_rating' => '', 'remarks' => ''];
          }
-         $grades_by_grade[$grade_num]['grades'][$sid]['q' . $q] = $r['grade'];
+         $slot_entry['grades'][$sid]['q' . $q] = $r['grade'];
          if (isset($r['final_rating']) && $r['final_rating'] !== '') {
-            $grades_by_grade[$grade_num]['grades'][$sid]['final_rating'] = $r['final_rating'];
+            $slot_entry['grades'][$sid]['final_rating'] = $r['final_rating'];
          }
          if (isset($r['remarks']) && $r['remarks'] !== '') {
-            $grades_by_grade[$grade_num]['grades'][$sid]['remarks'] = $r['remarks'];
+            $slot_entry['grades'][$sid]['remarks'] = $r['remarks'];
          }
       }
       $stmt_g->close();
+
+      $grades_by_grade[$grade_num][] = $slot_entry;
    }
    $stmt_sch->close();
 
-   // Convenience: expose Grade 1..8 arrays if present for backward compatibility
-   for ($i = 1; $i <= 8; $i++) {
-      ${"grades_grade" . $i} = $grades_by_grade[$i]['grades'] ?? [];
-   }
-
-   // Remedial classes fetcher per grade (1..8)
-   // This builds `remedial_grade1` .. `remedial_grade8` arrays mirroring preview logic
-   $remedial_by_grade = [];
-   if (!empty($grades_by_grade)) {
-      foreach ($grades_by_grade as $gnum => $ginfo) {
-         $sy = $ginfo['school']['school_year'] ?? null;
-         $remedial_by_grade[$gnum] = [];
-            if ($sy) {
-               // Prefer school_attended_id scoping if remedial_classes has the column
-               $col_check = $conn->query("SHOW COLUMNS FROM remedial_classes LIKE 'school_attended_id'");
-               $has_school_attended = ($col_check && $col_check->num_rows > 0);
-               if ($has_school_attended) {
-                  $stmt_r = $conn->prepare("SELECT * FROM remedial_classes WHERE student_id = ? AND school_attended_id = ? ORDER BY id ASC");
-                  $stmt_r->bind_param('ii', $student_id, $ginfo['school']['id']);
-               } else {
-                  $stmt_r = $conn->prepare("SELECT * FROM remedial_classes WHERE student_id = ? AND school_year = ? ORDER BY id ASC");
-                  $stmt_r->bind_param('is', $student_id, $sy);
-               }
-               $stmt_r->execute();
-               $res_r = $stmt_r->get_result();
-               if ($res_r) {
-                  $remedial_by_grade[$gnum] = $res_r->fetch_all(MYSQLI_ASSOC);
-               }
-               $stmt_r->close();
-            }
+   // -------------------------------------------------------------------------
+   // Build $sf10_slots: an ordered flat list of slots for the SF10 form.
+   // Each slot = one school record (possibly a transfer split of the same grade).
+   // Sheet001 covers Grades 1-4 → 4 slots (slots 0-3 → displayed as Grade I-IV).
+   // If grade N has TWO records (mid-year transfer), they occupy TWO consecutive slots.
+   // The school variables $grade1_school .. $grade4_school are re-assigned from slots.
+   // -------------------------------------------------------------------------
+   $sf10_slots = []; // flat ordered list
+   for ($gn = 1; $gn <= 8; $gn++) {
+      if (!empty($grades_by_grade[$gn])) {
+         foreach ($grades_by_grade[$gn] as $slot) {
+            $sf10_slots[] = $slot;
+         }
+      } else {
+         // Grade has no school record — add an empty placeholder slot
+         $sf10_slots[] = ['school' => null, 'grades' => []];
       }
    }
 
-   // Expose as convenience variables `remedial_grade1` .. `remedial_grade8`
+   // Re-assign convenience school variables for sheet001 (slots 0-3 = Grade row 1 left/right + row 2 left/right)
+   $grade1_school = $sf10_slots[0]['school'] ?? null;
+   $grade2_school = $sf10_slots[1]['school'] ?? null;
+   $grade3_school = $sf10_slots[2]['school'] ?? null;
+   $grade4_school = $sf10_slots[3]['school'] ?? null;
+
+   // Re-assign grades arrays from slots
+   $grades_grade1 = $sf10_slots[0]['grades'] ?? [];
+   $grades_grade2 = $sf10_slots[1]['grades'] ?? [];
+   $grades_grade3 = $sf10_slots[2]['grades'] ?? [];
+   $grades_grade4 = $sf10_slots[3]['grades'] ?? [];
+   // Grades 5-6 are on sheet002, but keep fallback for any shared usage
+   for ($i = 5; $i <= 8; $i++) {
+      ${"grades_grade" . $i} = $grades_by_grade[$i][0]['grades'] ?? [];
+   }
+
+   // -------------------------------------------------------------------------
+   // Post-process: clear final_rating and remarks for any subject that does
+   // not have all 4 quarters filled — final rating is only valid when complete.
+   // -------------------------------------------------------------------------
+   for ($i = 1; $i <= 8; $i++) {
+      $varName = "grades_grade" . $i;
+      foreach (${$varName} as $sid => &$gdata) {
+         $allFour = $gdata['q1'] !== '' && $gdata['q1'] !== null
+                 && $gdata['q2'] !== '' && $gdata['q2'] !== null
+                 && $gdata['q3'] !== '' && $gdata['q3'] !== null
+                 && $gdata['q4'] !== '' && $gdata['q4'] !== null;
+         if (!$allFour) {
+            $gdata['final_rating'] = '';
+            $gdata['remarks']      = '';
+         }
+      }
+      unset($gdata);
+   }
+
+   // -------------------------------------------------------------------------
+   // Remedial classes fetcher — keyed by actual grade number to prevent
+   // bleeding between grades that share the same school_year
+   // -------------------------------------------------------------------------
+   $remedial_by_grade = [];
+   // Check which columns are available for precision scoping
+   $col_check = $conn->query("SHOW COLUMNS FROM remedial_classes LIKE 'school_attended_id'");
+   $has_school_attended_col = ($col_check && $col_check->num_rows > 0);
+   $col_check_gl = $conn->query("SHOW COLUMNS FROM remedial_classes LIKE 'grade_level'");
+   $has_grade_level_col = ($col_check_gl && $col_check_gl->num_rows > 0);
+
+   foreach ($sf10_slots as $slot_idx => $slot_info) {
+      if (!$slot_info['school']) { continue; }
+      $school_row = $slot_info['school'];
+      // Extract the numeric grade number from grade_level (e.g. "Grade 3" -> 3, "3" -> 3)
+      $gl_label = $school_row['grade_level'] ?? '';
+      preg_match('/(\d+)/', $gl_label, $m);
+      $grade_num = isset($m[1]) ? intval($m[1]) : null;
+      if (!$grade_num) continue;
+      // Only fetch once per grade number (first school record wins; transfer records are skipped)
+      if (isset($remedial_by_grade[$grade_num])) continue;
+
+      $sy = $school_row['school_year'] ?? null;
+      $remedial_by_grade[$grade_num] = [];
+      if ($sy) {
+         if ($has_school_attended_col) {
+            $stmt_r = $conn->prepare("SELECT * FROM remedial_classes WHERE student_id = ? AND school_attended_id = ? ORDER BY id ASC");
+            $stmt_r->bind_param('ii', $student_id, $school_row['id']);
+         } elseif ($has_grade_level_col) {
+            // Filter by both school_year AND grade_level to isolate this grade's remedial
+            $stmt_r = $conn->prepare("SELECT * FROM remedial_classes WHERE student_id = ? AND school_year = ? AND grade_level = ? ORDER BY id ASC");
+            $stmt_r->bind_param('iss', $student_id, $sy, $gl_label);
+         } else {
+            // Legacy fallback: school_year only — may still bleed if grades share same year
+            $stmt_r = $conn->prepare("SELECT * FROM remedial_classes WHERE student_id = ? AND school_year = ? ORDER BY id ASC");
+            $stmt_r->bind_param('is', $student_id, $sy);
+         }
+         $stmt_r->execute();
+         $res_r = $stmt_r->get_result();
+         if ($res_r) {
+            $remedial_by_grade[$grade_num] = $res_r->fetch_all(MYSQLI_ASSOC);
+         }
+         $stmt_r->close();
+      }
+   }
+
+   // For transfer students: if the originating school slot had no remedial data,
+   // try fetching from the receiving school slot for the same grade
+   if ($has_school_attended_col) {
+      foreach ($sf10_slots as $slot_idx => $slot_info) {
+         if (!$slot_info['school']) continue;
+         $school_row = $slot_info['school'];
+         $gl_label = $school_row['grade_level'] ?? '';
+         preg_match('/(\d+)/', $gl_label, $m);
+         $grade_num = isset($m[1]) ? intval($m[1]) : null;
+         if (!$grade_num) continue;
+         if (!empty($remedial_by_grade[$grade_num])) continue; // already has data
+         $sy = $school_row['school_year'] ?? null;
+         if (!$sy) continue;
+         $stmt_r = $conn->prepare("SELECT * FROM remedial_classes WHERE student_id = ? AND school_attended_id = ? ORDER BY id ASC");
+         $stmt_r->bind_param('ii', $student_id, $school_row['id']);
+         $stmt_r->execute();
+         $res_r = $stmt_r->get_result();
+         if ($res_r) {
+            $fetched = $res_r->fetch_all(MYSQLI_ASSOC);
+            if (!empty($fetched)) $remedial_by_grade[$grade_num] = $fetched;
+         }
+         $stmt_r->close();
+      }
+   }
+
+   // Expose convenience variables remedial_grade1..8 keyed by actual grade number
    for ($i = 1; $i <= 8; $i++) {
       ${"remedial_grade" . $i} = $remedial_by_grade[$i] ?? [];
    }
@@ -332,10 +460,10 @@ else
 
 <!-- Back to preview card (hidden when printing) -->
 <div class="no-print" style="width: 100%; max-width: 1152px; margin-bottom: 15px; display: flex; gap: 10px;">
-   <div style="display:inline-block; background:#6c757d; color:#fff; border-radius:6px; padding:8px 12px;">
-      <a href="../pages/sf10_preview.php?student_id=<?= isset($student_id) ? intval($student_id) : '' ?>" style="color:inherit; text-decoration:none; font-weight:600;">
+   <div style="display:inline-block; background:#6c757d; color:#fff; border-radius:6px; padding:8px 12px; cursor: pointer;" onclick="if(window.parent && window.parent.closeTab){window.parent.closeTab();}else if(window.top && window.top.closeTab){window.top.closeTab();}else{window.location.href='../pages/sf10_preview.php?student_id=<?= isset($student_id) ? intval($student_id) : '' ?>';}">
+      <span style="color:inherit; text-decoration:none; font-weight:600;">
          &larr; Back to Preview
-      </a>
+      </span>
    </div>
    <div style="display:inline-block; background:#198754; color:#fff; border-radius:6px; padding:8px 12px; cursor: pointer;" onclick="window.print()">
       <span style="font-weight:600;">
@@ -1645,10 +1773,19 @@ else
 <?php
 // Compute printable General Average final rating for Grade 1 and Grade 2
 $ga_skip_ids = [9,10,11,12];
+// Helper: returns true only when all 4 quarters are non-empty for a grade entry
+$allQFilled = function($g) {
+   return isset($g['q1'],$g['q2'],$g['q3'],$g['q4'])
+       && $g['q1'] !== '' && $g['q1'] !== null
+       && $g['q2'] !== '' && $g['q2'] !== null
+       && $g['q3'] !== '' && $g['q3'] !== null
+       && $g['q4'] !== '' && $g['q4'] !== null;
+};
+
 $ga1_finals = [];
 foreach($grades_grade1 as $sid => $g) {
    if (in_array(intval($sid), $ga_skip_ids)) continue;
-   if (!empty($g['final_rating']) || $g['final_rating'] === '0') {
+   if ($allQFilled($g) && (!empty($g['final_rating']) || $g['final_rating'] === '0')) {
       $ga1_finals[] = round(floatval($g['final_rating']));
    }
 }
@@ -1657,7 +1794,7 @@ $ga1_final = (!empty($ga1_finals)) ? round(array_sum($ga1_finals)/count($ga1_fin
 $ga2_finals = [];
 foreach($grades_grade2 as $sid => $g) {
    if (in_array(intval($sid), $ga_skip_ids)) continue;
-   if (!empty($g['final_rating']) || $g['final_rating'] === '0') {
+   if ($allQFilled($g) && (!empty($g['final_rating']) || $g['final_rating'] === '0')) {
       $ga2_finals[] = round(floatval($g['final_rating']));
    }
 }
@@ -1667,7 +1804,7 @@ $ga2_final = (!empty($ga2_finals)) ? round(array_sum($ga2_finals)/count($ga2_fin
 $ga3_finals = [];
 foreach($grades_grade3 as $sid => $g) {
    if (in_array(intval($sid), $ga_skip_ids)) continue;
-   if (!empty($g['final_rating']) || $g['final_rating'] === '0') {
+   if ($allQFilled($g) && (!empty($g['final_rating']) || $g['final_rating'] === '0')) {
       $ga3_finals[] = round(floatval($g['final_rating']));
    }
 }
@@ -1676,7 +1813,7 @@ $ga3_final = (!empty($ga3_finals)) ? round(array_sum($ga3_finals)/count($ga3_fin
 $ga4_finals = [];
 foreach($grades_grade4 as $sid => $g) {
    if (in_array(intval($sid), $ga_skip_ids)) continue;
-   if (!empty($g['final_rating']) || $g['final_rating'] === '0') {
+   if ($allQFilled($g) && (!empty($g['final_rating']) || $g['final_rating'] === '0')) {
       $ga4_finals[] = round(floatval($g['final_rating']));
    }
 }

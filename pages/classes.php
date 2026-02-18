@@ -12,11 +12,25 @@ if (!$is_admin) {
 $success = "";
 $error = "";
 
+// Get current school year from selected session year, fallback to active year, then calendar default
+$currentSchoolYear = $_SESSION['school_year'] ?? null;
+if (empty($currentSchoolYear)) {
+    $sy_row = $conn->query("SELECT year FROM school_years WHERE is_active = 1 LIMIT 1");
+    if ($sy_row && $sy_row->num_rows > 0) {
+        $currentSchoolYear = $sy_row->fetch_assoc()['year'];
+    }
+}
+if (empty($currentSchoolYear)) {
+    $currentYear = date("Y");
+    $nextYear = $currentYear + 1;
+    $currentSchoolYear = "$currentYear-$nextYear";
+}
+
 // Handle Add Class
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_class'])) {
     $grade_level = $_POST['grade_level'];
     $section = trim($_POST['section']);
-    $school_year = $_POST['school_year'];
+    $school_year = $currentSchoolYear;
     $capacity = (int)$_POST['capacity'];
     
     // Check for duplicate
@@ -47,7 +61,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_class'])) {
     $id = (int)$_POST['class_id'];
     $grade_level = $_POST['grade_level'];
     $section = trim($_POST['section']);
-    $school_year = $_POST['school_year'];
+    $school_year = $currentSchoolYear;
     $capacity = (int)$_POST['capacity'];
     $status = $_POST['status'];
     
@@ -102,11 +116,6 @@ if (isset($_GET['delete_id'])) {
     }
 }
 
-// Get current school year
-$currentYear = date("Y");
-$nextYear = $currentYear + 1;
-$currentSchoolYear = "$currentYear-$nextYear";
-
 // Filter
 $filter_grade = isset($_GET['filter_grade']) ? $_GET['filter_grade'] : 'all';
 $filter_status = isset($_GET['filter_status']) ? $_GET['filter_status'] : 'all';
@@ -150,24 +159,64 @@ $current_page = 'classes';
         <h2><i class="bi bi-collection"></i> All Classes</h2>
         <p class="subtitle">Manage classes to assign to teachers</p>
     </div>
-    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addClassModal">
+    <a href="add_class.php" class="btn btn-primary">
         <i class="bi bi-plus-circle"></i> Add New Class
-    </button>
+    </a>
 </div>
 
 <?php if (!empty($error)): ?>
-<div class="alert alert-danger alert-dismissible fade show">
+<div class="alert alert-danger alert-dismissible fade show" id="errorAlert">
     <i class="bi bi-exclamation-circle"></i> <?= $error ?>
     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
 </div>
 <?php endif; ?>
 
 <?php if (!empty($success)): ?>
-<div class="alert alert-success alert-dismissible fade show">
+<div class="alert alert-success alert-dismissible fade show" id="successAlert">
     <i class="bi bi-check-circle"></i> <?= $success ?>
     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
 </div>
 <?php endif; ?>
+
+<?php if (isset($_SESSION['success_message'])): ?>
+<div class="alert alert-success alert-dismissible fade show" id="sessionSuccessAlert">
+    <i class="bi bi-check-circle"></i> <?= $_SESSION['success_message'] ?>
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+<?php unset($_SESSION['success_message']); endif; ?>
+
+<script>
+// Auto-dismiss alerts with fade out
+document.addEventListener('DOMContentLoaded', function() {
+    const successAlert = document.getElementById('successAlert');
+    const errorAlert = document.getElementById('errorAlert');
+    const sessionSuccessAlert = document.getElementById('sessionSuccessAlert');
+    
+    if (successAlert) {
+        setTimeout(() => {
+            successAlert.style.transition = 'opacity 0.5s ease-out';
+            successAlert.style.opacity = '0';
+            setTimeout(() => successAlert.remove(), 500);
+        }, 5000);
+    }
+    
+    if (errorAlert) {
+        setTimeout(() => {
+            errorAlert.style.transition = 'opacity 0.5s ease-out';
+            errorAlert.style.opacity = '0';
+            setTimeout(() => errorAlert.remove(), 500);
+        }, 7000);
+    }
+    
+    if (sessionSuccessAlert) {
+        setTimeout(() => {
+            sessionSuccessAlert.style.transition = 'opacity 0.5s ease-out';
+            sessionSuccessAlert.style.opacity = '0';
+            setTimeout(() => sessionSuccessAlert.remove(), 500);
+        }, 5000);
+    }
+});
+</script>
 
 <!-- Classes List -->
 <div class="card">
@@ -240,32 +289,38 @@ $current_page = 'classes';
 
             <style>
                 html, body {
+                    overflow: hidden !important;
                     height: 100vh;
                     margin: 0;
                     padding: 0;
-                    overflow: hidden !important;
                 }
                 body {
                     display: flex;
                     flex-direction: column;
-                    height: 100vh;
                 }
-                .main-wrapper {
-                    flex: 1 1 auto;
+                #mainContent {
                     display: flex;
                     flex-direction: column;
-                    min-height: 0;
+                    flex: 1 1 auto;
                     overflow: hidden;
+                    padding-bottom: 0 !important;
                 }
                 footer {
                     flex-shrink: 0;
+                    position: sticky;
+                    bottom: 0;
+                    z-index: 100;
                 }
-                .card {
+                #mainContent > * {
+                    flex-shrink: 0;
+                }
+                #mainContent .card:last-of-type {
                     flex: 1 1 auto;
                     display: flex;
                     flex-direction: column;
                     min-height: 0;
                     overflow: hidden;
+                    margin-bottom: 0 !important;
                 }
                 .card-body {
                     flex: 1 1 auto;
@@ -273,27 +328,28 @@ $current_page = 'classes';
                     flex-direction: column;
                     min-height: 0;
                     overflow: hidden;
+                    padding-bottom: 1rem !important;
                 }
                 .table-responsive {
                     flex: 1 1 auto;
                     min-height: 0;
                     overflow-y: auto !important;
                     overflow-x: hidden;
+                    margin-bottom: 0;
                 }
                 #classesTable {
                     font-size: 13px;
                     width: 100%;
+                    margin-bottom: 0;
                 }
                 #classesTable th, #classesTable td {
                     padding: 6px 8px;
                 }
-                /* Hide scrollbars for body/html only */
-                html::-webkit-scrollbar, body::-webkit-scrollbar {
-                    display: none !important;
-                }
-                html, body {
-                    scrollbar-width: none !important;
-                    -ms-overflow-style: none !important;
+                #classesTable thead {
+                    position: sticky;
+                    top: 0;
+                    z-index: 10;
+                    background: var(--card-bg, #fff);
                 }
 
                 /* Mobile responsive styles */
@@ -387,7 +443,7 @@ $current_page = 'classes';
                                                 <i class="bi bi-three-dots-vertical"></i>
                                             </button>
                                             <ul class="dropdown-menu dropdown-menu-end shadow" aria-labelledby="actionsDropdown<?= $class['id'] ?>" style="z-index: 1050;">
-                                                <li><a class="dropdown-item" href="javascript:void(0)" data-bs-toggle="modal" data-bs-target="#editModal<?= $class['id'] ?>">
+                                                <li><a class="dropdown-item" href="edit_class.php?id=<?= $class['id'] ?>">
                                                     <i class="bi bi-pencil text-warning me-2"></i>Edit Class
                                                 </a></li>
                                                 <li><hr class="dropdown-divider"></li>
@@ -399,55 +455,6 @@ $current_page = 'classes';
                                     </td>
                                 </tr>
 
-                                <!-- Edit Modal -->
-                                <div class="modal fade" id="editModal<?= $class['id'] ?>" tabindex="-1" style="margin-top: 80px;">
-                                    <div class="modal-dialog">
-                                        <div class="modal-content" style="max-height: 85vh; display: flex; flex-direction: column;">
-                                            <div class="modal-header">
-                                                <h5 class="modal-title">Edit Class</h5>
-                                                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                                            </div>
-                                            <form method="POST">
-                                                <div class="modal-body">
-                                                    <input type="hidden" name="class_id" value="<?= $class['id'] ?>">
-                                                    <div class="mb-3">
-                                                        <label class="form-label">Grade Level</label>
-                                                        <select name="grade_level" class="form-select" required>
-                                                            <?php for($i = 1; $i <= 12; $i++): ?>
-                                                            <option value="<?= $i ?>" <?= $class['grade_level'] == $i ? 'selected' : '' ?>>Grade <?= $i ?></option>
-                                                            <?php endfor; ?>
-                                                        </select>
-                                                    </div>
-                                                    <div class="mb-3">
-                                                        <label class="form-label">Section Name</label>
-                                                        <input type="text" name="section" class="form-control" value="<?= htmlspecialchars($class['section']) ?>" required>
-                                                    </div>
-                                                    <div class="mb-3">
-                                                        <label class="form-label">School Year</label>
-                                                        <input type="text" name="school_year" class="form-control" value="<?= htmlspecialchars($class['school_year']) ?>" required>
-                                                    </div>
-                                                    <div class="mb-3">
-                                                        <label class="form-label">Maximum Capacity</label>
-                                                        <input type="number" name="capacity" class="form-control" value="<?= $class['capacity'] ?>" min="1" max="100" required>
-                                                    </div>
-                                                    <div class="mb-3">
-                                                        <label class="form-label">Status</label>
-                                                        <select name="status" class="form-select" required>
-                                                            <option value="Active" <?= $class['status'] == 'Active' ? 'selected' : '' ?>>Active</option>
-                                                            <option value="Inactive" <?= $class['status'] == 'Inactive' ? 'selected' : '' ?>>Inactive</option>
-                                                        </select>
-                                                    </div>
-                                                </div>
-                                                <div class="modal-footer">
-                                                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                                                    <button type="submit" name="edit_class" class="btn btn-primary">
-                                                        <i class="bi bi-check-lg"></i> Update Class
-                                                    </button>
-                                                </div>
-                                            </form>
-                                        </div>
-                                    </div>
-                                </div>
                                 <?php endwhile; ?>
                             <?php else: ?>
                                 <tr>
@@ -462,52 +469,6 @@ $current_page = 'classes';
                     </table>
                 </div>
             </div>
-        </div>
-    </div>
-</div>
-
-<!-- Add Class Modal -->
-<div class="modal fade" id="addClassModal" tabindex="-1" style="margin-top: 80px;">
-    <div class="modal-dialog">
-        <div class="modal-content" style="max-height: 85vh; display: flex; flex-direction: column;">
-            <div class="modal-header">
-                <h5 class="modal-title"><i class="bi bi-plus-circle"></i> Add New Class</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <form method="POST">
-                <div class="modal-body">
-                    <div class="mb-3">
-                        <label class="form-label">Grade Level</label>
-                        <select name="grade_level" class="form-select" required>
-                            <option value="">Select Grade Level</option>
-                            <?php for($i = 1; $i <= 6; $i++): ?>
-                            <option value="<?= $i ?>">Grade <?= $i ?></option>
-                            <?php endfor; ?>
-                        </select>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">Section Name</label>
-                        <input type="text" name="section" class="form-control" placeholder="e.g., Diamond, Einstein, A" required>
-                        <small class="text-muted">Enter section name (e.g., Diamond, A, Einstein)</small>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">School Year</label>
-                        <input type="text" name="school_year" class="form-control" value="<?= $currentSchoolYear ?>" placeholder="2025-2026" required>
-                        <small class="text-muted">Format: YYYY-YYYY</small>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">Maximum Capacity</label>
-                        <input type="number" name="capacity" class="form-control" value="40" min="1" max="100" required>
-                        <small class="text-muted">Maximum number of students</small>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" name="add_class" class="btn btn-primary">
-                        <i class="bi bi-plus-lg"></i> Add Class
-                    </button>
-                </div>
-            </form>
         </div>
     </div>
 </div>

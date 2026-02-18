@@ -12,15 +12,11 @@
  * @return array Array of subjects
  */
 function getSubjectsByGrade($conn, $grade_level, $include_mapeh_components = true) {
-    // Get configured subjects for this grade
-    $query = "SELECT s.*, 
-              COALESCE(sgc.is_active, 
-                      CASE 
-                          WHEN ? BETWEEN s.min_grade AND s.max_grade THEN 1 
-                          ELSE 0 
-                      END) as is_active
+    // Get subjects for this grade level, using custom display name from subject_grade_groups when set
+    $query = "SELECT s.*,
+              COALESCE(NULLIF(sgg.subject_name, ''), s.subject_name) AS subject_name
               FROM subjects s
-              LEFT JOIN subject_grade_config sgc ON s.id = sgc.subject_id AND sgc.grade_level = ?
+              LEFT JOIN subject_grade_groups sgg ON sgg.subject_id = s.id AND sgg.grade_level = ?
               WHERE s.subject_name != 'General Average'
               AND ? BETWEEN COALESCE(s.min_grade, 1) AND COALESCE(s.max_grade, 6)";
     
@@ -28,10 +24,10 @@ function getSubjectsByGrade($conn, $grade_level, $include_mapeh_components = tru
         $query .= " AND s.is_mapeh_component = 0";
     }
     
-    $query .= " HAVING is_active = 1 ORDER BY s.display_order, s.subject_name";
+    $query .= " ORDER BY s.display_order, s.subject_name";
     
     $stmt = $conn->prepare($query);
-    $stmt->bind_param("iii", $grade_level, $grade_level, $grade_level);
+    $stmt->bind_param("ii", $grade_level, $grade_level);
     $stmt->execute();
     $result = $stmt->get_result();
     

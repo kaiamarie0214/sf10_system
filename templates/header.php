@@ -177,6 +177,52 @@ $is_admin = ($user['role'] === 'admin');
       background: rgba(52, 58, 64, 0.95);
       color: #FFD700;
     }
+    
+    /* School Year Dropdown Styles */
+    .dropdown-menu {
+      border-radius: 8px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+      border: 1px solid rgba(0, 0, 0, 0.1);
+      padding: 8px 0;
+    }
+    
+    .dropdown-item {
+      padding: 8px 16px;
+      transition: all 0.2s ease;
+    }
+    
+    .dropdown-item:hover {
+      background-color: rgba(13, 110, 253, 0.1);
+    }
+    
+    .dropdown-item.active {
+      background-color: rgba(13, 110, 253, 0.15);
+      color: #0d6efd;
+      font-weight: 500;
+    }
+    
+    .dark-theme .dropdown-menu {
+      background-color: #2d3238;
+      border-color: rgba(255, 255, 255, 0.1);
+    }
+    
+    .dark-theme .dropdown-item {
+      color: #e9ecef;
+    }
+    
+    .dark-theme .dropdown-item:hover {
+      background-color: rgba(255, 255, 255, 0.1);
+      color: #fff;
+    }
+    
+    .dark-theme .dropdown-item.active {
+      background-color: rgba(13, 110, 253, 0.25);
+      color: #6ea8fe;
+    }
+    
+    .dark-theme .dropdown-divider {
+      border-color: rgba(255, 255, 255, 0.1);
+    }
   </style>
 </head>
 <body>
@@ -217,6 +263,65 @@ $is_admin = ($user['role'] === 'admin');
     <span class="role-badge <?= $is_admin ? 'role-admin' : 'role-teacher' ?>" style="margin-left: 5px;">
       <?= $is_admin ? 'Admin' : 'Teacher' ?>
     </span>
+    <?php if (isset($_SESSION['school_year'])): ?>
+      <?php if ($is_admin): ?>
+        <!-- Admin: School Year Dropdown -->
+        <div class="dropdown">
+          <button class="btn btn-light btn-sm dropdown-toggle" type="button" id="schoolYearDropdown" data-bs-toggle="dropdown" aria-expanded="false" style="background: rgba(255,255,255,0.95); color: #333; border: none; padding: 6px 15px; font-weight: 500; font-size: 13px; display: inline-flex; align-items: center; gap: 6px;">
+            <i class="bi bi-calendar-event" style="font-size: 14px;"></i>
+            <span>SY <?= htmlspecialchars($_SESSION['school_year']) ?></span>
+          </button>
+          <ul class="dropdown-menu dropdown-menu-end shadow" aria-labelledby="schoolYearDropdown">
+            <?php
+            $sy_query = $conn->query("SELECT id, year, status FROM school_years ORDER BY year DESC");
+            while ($sy = $sy_query->fetch_assoc()):
+              $is_current = ($_SESSION['school_year_id'] == $sy['id']);
+            ?>
+            <li>
+              <a class="dropdown-item <?= $is_current ? 'active' : '' ?>" 
+                 href="#" 
+                 onclick="switchSchoolYear(<?= $sy['id'] ?>, '<?= htmlspecialchars($sy['year']) ?>'); return false;">
+                <i class="bi bi-calendar-check<?= $is_current ? '-fill' : '' ?> me-2"></i>
+                <?= htmlspecialchars($sy['year']) ?>
+                <?php if ($is_current): ?>
+                  <i class="bi bi-check-circle-fill text-success float-end"></i>
+                <?php endif; ?>
+              </a>
+            </li>
+            <?php endwhile; ?>
+            <li><hr class="dropdown-divider"></li>
+            <li>
+              <a class="dropdown-item" href="school_years.php">
+                <i class="bi bi-gear text-primary me-2"></i> Manage School Years
+              </a>
+            </li>
+          </ul>
+        </div>
+      <?php else: ?>
+        <!-- Teacher: School Year Display (matches admin dropdown style, non-interactive) -->
+        <div class="dropdown">
+          <button class="btn btn-light btn-sm dropdown-toggle" type="button" id="schoolYearDropdownTeacher" data-bs-toggle="dropdown" aria-expanded="false" style="background: rgba(255,255,255,0.95); color: #333; border: none; padding: 6px 15px; font-weight: 500; font-size: 13px; display: inline-flex; align-items: center; gap: 6px;">
+            <i class="bi bi-calendar-event" style="font-size: 14px;"></i>
+            <span>SY <?= htmlspecialchars($_SESSION['school_year']) ?></span>
+          </button>
+          <ul class="dropdown-menu dropdown-menu-end shadow" aria-labelledby="schoolYearDropdownTeacher">
+            <li>
+              <span class="dropdown-item active" style="pointer-events:none;">
+                <i class="bi bi-calendar-check-fill me-2"></i>
+                <?= htmlspecialchars($_SESSION['school_year']) ?>
+                <i class="bi bi-check-circle-fill text-success float-end"></i>
+              </span>
+            </li>
+            <li><hr class="dropdown-divider"></li>
+            <li>
+              <span class="dropdown-item text-muted" style="font-size:12px; pointer-events:none;">
+                <i class="bi bi-info-circle me-2"></i> Contact admin to switch school year
+              </span>
+            </li>
+          </ul>
+        </div>
+      <?php endif; ?>
+    <?php endif; ?>
   </div>
   <div style="margin-left: auto; display: flex; align-items: center; gap: 15px;">
     <span style="color: white; font-size: 13px;" class="d-none d-sm-inline">
@@ -241,6 +346,44 @@ $is_admin = ($user['role'] === 'admin');
         }
       })();
     </script>
+    <script>
+      // Switch school year function for admin
+      function switchSchoolYear(schoolYearId, schoolYearName) {
+        if (confirm('Switch to school year ' + schoolYearName + '?\\n\\nThis will reload the page with the new school year data.')) {
+          // Show loading indicator
+          const blocker = document.getElementById('pjaxBlocker');
+          if (blocker) blocker.style.display = 'block';
+          
+          // Make AJAX request to switch school year
+          // Detect if we're already in /pages/ directory
+          const currentPath = window.location.pathname;
+          const switchUrl = currentPath.includes('/pages/') ? 'switch_school_year.php' : '../pages/switch_school_year.php';
+          
+          fetch(switchUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: 'school_year_id=' + schoolYearId
+          })
+          .then(response => response.json())
+          .then(data => {
+            if (data.success) {
+              // Reload the current page to reflect new school year
+              window.location.reload();
+            } else {
+              alert('Error switching school year: ' + (data.message || 'Unknown error'));
+              if (blocker) blocker.style.display = 'none';
+            }
+          })
+          .catch(error => {
+            alert('Error switching school year. Please try again.');
+            console.error('Error:', error);
+            if (blocker) blocker.style.display = 'none';
+          });
+        }
+      }
+    </script>
     <!-- Logout Button -->
     <a href="../logout.php" class="btn btn-light btn-sm" id="logoutBtn" style="background: rgba(255,255,255,0.95); color: #dc3545; border: none; padding: 6px 15px; font-weight: 500;">
       <i class="bi bi-box-arrow-right"></i> <span class="d-none d-sm-inline">Logout</span>
@@ -251,6 +394,11 @@ $is_admin = ($user['role'] === 'admin');
 <!-- Mobile Overlay -->
 <div class="mobile-overlay" id="mobileOverlay" onclick="toggleMobileMenu()"></div>
 
+<?php
+// Check if admin needs setup (no school year)
+$needs_setup = $is_admin && empty($_SESSION['school_year_id']);
+?>
+
 <!-- Sidebar Navigation -->
 <div class="sidebar">
   <div class="nav-section">
@@ -259,6 +407,7 @@ $is_admin = ($user['role'] === 'admin');
     </div>
   </div>
 
+  <?php if (!$needs_setup): ?>
   <div class="nav-section">
     <a href="dashboard.php" class="nav-link <?= $current_page == 'dashboard' ? 'active' : '' ?>">
       <i class="bi bi-speedometer2"></i> Dashboard
@@ -267,15 +416,15 @@ $is_admin = ($user['role'] === 'admin');
 
   <!-- Records Section (All Users) -->
   <div class="nav-section">
-    <a href="records.php" class="nav-link <?= $current_page == 'records' ? 'active' : '' ?>">
-      <i class="bi bi-book"></i> Records
+    <a href="students.php" class="nav-link <?= in_array($current_page, ['students', 'records', 'grade_progression', 'view_student', 'edit_student']) ? 'active' : '' ?>">
+      <i class="bi bi-person-lines-fill"></i> Students
     </a>
   </div>
 
   <!-- My Class Section (Teacher Only) -->
   <?php if (!$is_admin): ?>
   <div class="nav-section">
-    <a href="my_class.php" class="nav-link <?= $current_page == 'my_class' ? 'active' : '' ?>">
+    <a href="my_class.php" class="nav-link <?= in_array($current_page, ['my_class', 'add_student_to_class']) ? 'active' : '' ?>">
       <i class="bi bi-person-workspace"></i> My Class
     </a>
   </div>
@@ -284,7 +433,7 @@ $is_admin = ($user['role'] === 'admin');
   <!-- Classes Section (Admin Only) -->
   <?php if ($is_admin): ?>
   <div class="nav-section">
-    <a href="classes.php" class="nav-link <?= $current_page == 'classes' ? 'active' : '' ?>">
+    <a href="classes.php" class="nav-link <?= in_array($current_page, ['classes', 'add_class', 'edit_class']) ? 'active' : '' ?>">
       <i class="bi bi-grid-3x3-gap"></i> Classes
     </a>
   </div>
@@ -292,10 +441,34 @@ $is_admin = ($user['role'] === 'admin');
 
   <!-- Grades Section -->
   <div class="nav-section">
-    <a href="grades.php" class="nav-link <?= $current_page == 'grades' ? 'active' : '' ?>">
-      <i class="bi bi-journal-text"></i> Grades
+    <?php if ($is_admin): ?>
+    <a href="grade_entry.php" class="nav-link <?= in_array($current_page, ['grade_entry', 'enter_grades']) ? 'active' : '' ?>">
+      <i class="bi bi-pencil-square"></i> Grade Entry
+    </a>
+    <?php else: ?>
+    <a href="input_grades.php" class="nav-link <?= in_array($current_page, ['input_grades', 'input_grades_form', 'enter_grades']) ? 'active' : '' ?>">
+      <i class="bi bi-pencil-square"></i> Grade Entry
+    </a>
+    <?php endif; ?>
+  </div>
+
+  <!-- Manage School Subjects (Admin Only) -->
+  <?php if ($is_admin): ?>
+  <div class="nav-section">
+    <a href="manage_subjects.php" class="nav-link <?= $current_page == 'manage_subjects' ? 'active' : '' ?>">
+      <i class="bi bi-book"></i> School Subjects
     </a>
   </div>
+  <?php endif; ?>
+
+  <!-- Manage Quarter Locks (Admin Only) -->
+  <?php if ($is_admin): ?>
+  <div class="nav-section">
+    <a href="manage_quarter_locks.php" class="nav-link <?= $current_page == 'manage_quarter_locks' ? 'active' : '' ?>">
+      <i class="bi bi-lock-fill"></i> Quarter Locks
+    </a>
+  </div>
+  <?php endif; ?>
 
   <!-- SF10 Generate Section (Admin Only) -->
   <?php if ($is_admin): ?>
@@ -305,8 +478,9 @@ $is_admin = ($user['role'] === 'admin');
     </a>
   </div>
   <?php endif; ?>
+  <?php endif; ?>
 
-  <!-- User Management Section (Admin Only) -->
+  <!-- User Management Section (Admin Only) - Always visible for admin -->
   <?php if ($is_admin): ?>
   <div class="nav-section">
     <a href="users.php" class="nav-link <?= $current_page == 'users' ? 'active' : '' ?>">
@@ -315,6 +489,16 @@ $is_admin = ($user['role'] === 'admin');
   </div>
   <?php endif; ?>
 
+  <!-- School Year Management (Admin Only) - Always visible for admin -->
+  <?php if ($is_admin): ?>
+  <div class="nav-section">
+    <a href="school_years.php" class="nav-link <?= $current_page == 'school_years' ? 'active' : '' ?>">
+      <i class="bi bi-calendar3"></i> School Years
+    </a>
+  </div>
+  <?php endif; ?>
+
+  <?php if (!$needs_setup): ?>
   <!-- Activity Logs Section (Admin Only) -->
   <?php if ($is_admin): ?>
   <div class="nav-section">
@@ -323,6 +507,14 @@ $is_admin = ($user['role'] === 'admin');
     </a>
   </div>
   <?php endif; ?>
+  <?php endif; ?>
+
+  <!-- Reports (Admin + Teacher) -->
+  <div class="nav-section">
+    <a href="reports.php" class="nav-link <?= $current_page == 'reports' ? 'active' : '' ?>">
+      <i class="bi bi-award-fill"></i> Reports
+    </a>
+  </div>
 
   <!-- Backup / Import-Export (Admin Only) -->
   <?php if ($is_admin): ?>

@@ -8,13 +8,14 @@ $is_admin = ($user['role'] === 'admin');
 
 // Get teacher's class info if teacher
 $teacher_class = null;
-$current_school_year = date('Y') . '-' . (date('Y') + 1);
+$current_school_year = $_SESSION['school_year'] ?? (date('Y') . '-' . (date('Y') + 1));
 
 if ($is_teacher) {
+    $school_year_id = $_SESSION['school_year_id'];
     $adviser_query = "SELECT grade_level, section FROM teacher_assignments 
-                      WHERE teacher_id = ? AND assignment_type = 'adviser' LIMIT 1";
+                      WHERE teacher_id = ? AND assignment_type = 'adviser' AND school_year_id = ? LIMIT 1";
     $stmt = $conn->prepare($adviser_query);
-    $stmt->bind_param("i", $user['id']);
+    $stmt->bind_param("ii", $user['id'], $school_year_id);
     $stmt->execute();
     $teacher_class = $stmt->get_result()->fetch_assoc();
 }
@@ -27,23 +28,21 @@ if ($is_teacher && $teacher_class) {
     
         $total_students_stmt = $conn->prepare("SELECT COUNT(DISTINCT sa.student_id) as count
                                                                             FROM schools_attended sa
-                                                                            JOIN (SELECT student_id, MAX(id) AS max_id FROM schools_attended GROUP BY student_id) l
-                                                                                ON sa.student_id = l.student_id AND sa.id = l.max_id
-                                                                            WHERE sa.grade_level = ? AND sa.section = ? AND sa.school_year = ?
-                                                                              AND (sa.active = 1 OR sa.active IS NULL)");
+                                                                            WHERE sa.grade_level = ? AND LOWER(sa.section) = LOWER(?) AND sa.school_year = ?
+                                                                              AND sa.active = 1");
         $total_students_stmt->bind_param("iss", $grade_level, $section, $current_school_year);
         $total_students_stmt->execute();
         $total_students = $total_students_stmt->get_result()->fetch_assoc()['count'];
     
     // Get subjects assigned to this teacher
     $total_subjects = $conn->prepare("SELECT COUNT(DISTINCT subject_id) as count FROM teacher_assignments 
-                                      WHERE teacher_id = ? AND assignment_type = 'subject'");
-    $total_subjects->bind_param("i", $user['id']);
+                                      WHERE teacher_id = ? AND assignment_type = 'subject' AND school_year_id = ?");
+    $total_subjects->bind_param("ii", $user['id'], $school_year_id);
     $total_subjects->execute();
     $total_subjects = $total_subjects->get_result()->fetch_assoc()['count'];
     
-    // Get total grades entered by this teacher
-    $total_records = $conn->prepare("SELECT COUNT(*) as count FROM grades g
+    // Get total students who have at least one grade entered ("grades entered" = per student)
+    $total_records = $conn->prepare("SELECT COUNT(DISTINCT g.student_id) as count FROM grades g
                                      JOIN schools_attended sa ON g.school_attended_id = sa.id
                                      WHERE sa.grade_level = ? AND sa.section = ? AND sa.school_year = ?
                                      AND g.grade IS NOT NULL");
@@ -74,11 +73,11 @@ if ($is_teacher && $teacher_class) {
                            LEFT JOIN grades g ON g.subject_id = s.id 
                            LEFT JOIN schools_attended sa ON g.school_attended_id = sa.id 
                                AND sa.grade_level = ? AND sa.section = ? AND sa.school_year = ?
-                           WHERE ta.teacher_id = ? AND ta.assignment_type = 'subject'
+                           WHERE ta.teacher_id = ? AND ta.assignment_type = 'subject' AND ta.school_year_id = ?
                            GROUP BY s.id, s.subject_name
                            ORDER BY s.subject_name";
     $stmt = $conn->prepare($subject_stats_query);
-    $stmt->bind_param("issi", $grade_level, $section, $current_school_year, $user['id']);
+    $stmt->bind_param("issii", $grade_level, $section, $current_school_year, $user['id'], $school_year_id);
     $stmt->execute();
     $subject_stats = $stmt->get_result();
 } else {
@@ -107,7 +106,7 @@ if ($is_teacher && $teacher_class) {
     $stmt = $conn->prepare("SELECT CONCAT(st.first_name, ' ', st.last_name) as name, sa.created_at 
                            FROM schools_attended sa
                            JOIN students st ON sa.student_id = st.id
-                           WHERE sa.grade_level = ? AND sa.section = ? AND sa.school_year = ? AND (sa.active = 1 OR sa.active IS NULL)
+                           WHERE sa.grade_level = ? AND LOWER(sa.section) = LOWER(?) AND sa.school_year = ? AND sa.active = 1
                            ORDER BY sa.created_at DESC LIMIT 1");
     $stmt->bind_param("iss", $grade_level, $section, $current_school_year);
     $stmt->execute();
@@ -200,7 +199,7 @@ function timeAgo($datetime) {
 <div class="row mb-4">
     <?php if (!$is_teacher): ?>
     <div class="col-md-3">
-        <div class="stats-card" onclick="window.location.href='records.php'" style="cursor: pointer;">
+        <div class="stats-card" onclick="window.location.href='students.php'" style="cursor: pointer;">
             <div class="icon">
                 <i class="bi bi-people-fill"></i>
             </div>
@@ -246,12 +245,17 @@ function timeAgo($datetime) {
         </div>
     </div>
     <div class="col-md-4">
-        <div class="stats-card" onclick="window.location.href='my_class.php'" style="cursor: pointer;">
+        <div class="stats-card" <?= $teacher_class ? "onclick=\"window.location.href='my_class.php'\" style=\"cursor:pointer;\"" : '' ?>>
             <div class="icon">
                 <i class="bi bi-bookmarks-fill"></i>
             </div>
             <div class="label">My Class</div>
-            <div class="value"><?= htmlspecialchars($teacher_class['grade_level'] . ' - ' . $teacher_class['section']) ?></div>
+            <?php if ($teacher_class): ?>
+                <div class="value"><?= htmlspecialchars('Grade ' . $teacher_class['grade_level'] . ' - ' . $teacher_class['section']) ?></div>
+            <?php else: ?>
+                <div class="value" style="font-size:14px; color:#a0aec0;">No class assigned yet</div>
+                <div style="font-size:12px; color:#718096; margin-top:4px;">Please wait for admin to assign your class</div>
+            <?php endif; ?>
         </div>
     </div>
     <div class="col-md-4">
@@ -259,7 +263,7 @@ function timeAgo($datetime) {
             <div class="icon">
                 <i class="bi bi-file-text-fill"></i>
             </div>
-            <div class="label">Grades Entered</div>
+            <div class="label">Students Graded</div>
             <div class="value"><?= number_format($total_records) ?></div>
         </div>
     </div>
@@ -287,7 +291,7 @@ function timeAgo($datetime) {
                         $gender_counts = [0,0,0];
                         $grade_level = $teacher_class['grade_level'];
                         $section = $teacher_class['section'];
-                        $stmt = $conn->prepare("SELECT LOWER(TRIM(s.gender)) AS gender, COUNT(DISTINCT sa.student_id) AS cnt FROM schools_attended sa JOIN (SELECT student_id, MAX(id) AS max_id FROM schools_attended GROUP BY student_id) l ON sa.student_id = l.student_id AND sa.id = l.max_id JOIN students s ON sa.student_id = s.id WHERE sa.grade_level = ? AND sa.section = ? AND sa.school_year = ? AND (sa.active = 1 OR sa.active IS NULL) GROUP BY s.gender");
+                        $stmt = $conn->prepare("SELECT LOWER(TRIM(s.gender)) AS gender, COUNT(DISTINCT sa.student_id) AS cnt FROM schools_attended sa JOIN students s ON sa.student_id = s.id WHERE sa.grade_level = ? AND LOWER(sa.section) = LOWER(?) AND sa.school_year = ? AND sa.active = 1 GROUP BY s.gender");
                         $stmt->bind_param("iss", $grade_level, $section, $current_school_year);
                         $stmt->execute();
                         $res = $stmt->get_result();

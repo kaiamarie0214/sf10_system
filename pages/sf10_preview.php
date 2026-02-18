@@ -174,22 +174,28 @@ foreach ($school_records as $school) {
         $all_grades[$key]['general_average']['remarks'] = $avg['remarks'] ?? '';
     }
     
-    // Get remedial classes for this school
+    // Get remedial classes for this school (scoped precisely to avoid cross-grade bleeding)
     $col_check = $conn->query("SHOW COLUMNS FROM remedial_classes LIKE 'school_attended_id'");
     $has_school_attended = ($col_check && $col_check->num_rows > 0);
+    $col_check_gl = $conn->query("SHOW COLUMNS FROM remedial_classes LIKE 'grade_level'");
+    $has_grade_level_col = ($col_check_gl && $col_check_gl->num_rows > 0);
 
     if ($has_school_attended) {
-        $remedial_query = "SELECT * FROM remedial_classes WHERE student_id = ? AND school_attended_id = ? ORDER BY id ASC";
-        $stmt = $conn->prepare($remedial_query);
+        // Most precise: scoped to exact school_attended record
+        $stmt = $conn->prepare("SELECT * FROM remedial_classes WHERE student_id = ? AND school_attended_id = ? ORDER BY id ASC");
         $stmt->bind_param("ii", $student_id, $school['id']);
+    } elseif ($has_grade_level_col && !empty($school['grade_level'])) {
+        // Scope by both school_year AND grade_level — prevents cross-grade bleeding
+        $stmt = $conn->prepare("SELECT * FROM remedial_classes WHERE student_id = ? AND school_year = ? AND grade_level = ? ORDER BY id ASC");
+        $stmt->bind_param("iss", $student_id, $school['school_year'], $school['grade_level']);
     } else {
-        $remedial_query = "SELECT * FROM remedial_classes WHERE student_id = ? AND school_year = ? ORDER BY id ASC";
-        $stmt = $conn->prepare($remedial_query);
+        // Legacy fallback — only school_year (old records without grade_level column)
+        $stmt = $conn->prepare("SELECT * FROM remedial_classes WHERE student_id = ? AND school_year = ? ORDER BY id ASC");
         $stmt->bind_param("is", $student_id, $school['school_year']);
     }
     $stmt->execute();
     $remedial_result = $stmt->get_result();
-    
+
     $all_remedial[$key] = [];
     while ($remedial = $remedial_result->fetch_assoc()) {
         $all_remedial[$key][] = $remedial;
@@ -205,12 +211,12 @@ require_once '../templates/header.php';
         <p class="subtitle">Review Student Academic Record Before Download</p>
     </div>
     <div class="d-flex gap-2">
-        <a href="../SF10_official_final.php?student_id=<?= $student_id ?>" class="btn btn-info" style="padding: .45rem .75rem;" target="_blank">
+        <button onclick="window.open('../SF10_official_final.php?student_id=<?= $student_id ?>', '_blank')" class="btn btn-info" style="padding: .45rem .75rem;">
             <i class="bi bi-file-earmark-text"></i> View Front Sheet
-        </a>
-        <a href="../SF10_official_final_back.php?student_id=<?= $student_id ?>" class="btn btn-info" style="padding: .45rem .75rem;" target="_blank">
+        </button>
+        <button onclick="window.open('../SF10_official_final_back.php?student_id=<?= $student_id ?>', '_blank')" class="btn btn-info" style="padding: .45rem .75rem;">
             <i class="bi bi-file-earmark-text"></i> View Back Sheet
-        </a>
+        </button>
     </div>
 </div>
 
@@ -259,9 +265,14 @@ require_once '../templates/header.php';
             <span>
                 <i class="bi bi-book"></i> Grade <?= $school['grade_level'] ?> - School Year <?= htmlspecialchars($school['school_year']) ?>
             </span>
-            <a href="grades.php?student_id=<?= $student_id ?>&school_attended_id=<?= $school['id'] ?>&school_year=<?= urlencode($school['school_year']) ?>&open_new_tab=1" class="btn btn-sm btn-primary">
-                <i class="bi bi-pencil-square"></i> Edit Grades
-            </a>
+            <div class="d-flex gap-2">
+                <a href="grade_progression.php?student_id=<?= $student_id ?>&expand_grade=<?= $school['grade_level'] ?>" class="btn btn-sm btn-warning">
+                    <i class="bi bi-pencil"></i> Edit Information
+                </a>
+                <a href="enter_grades.php?student_id=<?= $student_id ?>&school_attended_id=<?= $school['id'] ?>" class="btn btn-sm btn-primary">
+                    <i class="bi bi-pencil-square"></i> Edit Grades
+                </a>
+            </div>
         </div>
         <div class="card-body">
             <div class="row mb-3">
@@ -304,14 +315,22 @@ require_once '../templates/header.php';
                             // Get grades for this subject (may not exist)
                             $g = $grades[$sid] ?? null;
                         ?>
+                        <?php
+                            $all_quarters_filled = $g &&
+                                isset($g['q1'], $g['q2'], $g['q3'], $g['q4']) &&
+                                $g['q1'] !== '' && $g['q1'] !== null &&
+                                $g['q2'] !== '' && $g['q2'] !== null &&
+                                $g['q3'] !== '' && $g['q3'] !== null &&
+                                $g['q4'] !== '' && $g['q4'] !== null;
+                        ?>
                         <tr>
                             <td><?= htmlspecialchars($display_name) ?></td>
                             <td><?= $g && isset($g['q1']) && $g['q1'] !== '' && $g['q1'] !== null ? round($g['q1']) : '-' ?></td>
                             <td><?= $g && isset($g['q2']) && $g['q2'] !== '' && $g['q2'] !== null ? round($g['q2']) : '-' ?></td>
                             <td><?= $g && isset($g['q3']) && $g['q3'] !== '' && $g['q3'] !== null ? round($g['q3']) : '-' ?></td>
                             <td><?= $g && isset($g['q4']) && $g['q4'] !== '' && $g['q4'] !== null ? round($g['q4']) : '-' ?></td>
-                            <td><strong><?= $g && isset($g['final_rating']) && $g['final_rating'] !== '' && $g['final_rating'] !== null ? round($g['final_rating']) : '-' ?></strong></td>
-                            <td><?= $g && isset($g['remarks']) && $g['remarks'] !== '' && $g['remarks'] !== null ? htmlspecialchars($g['remarks']) : '-' ?></td>
+                            <td><strong><?= $all_quarters_filled && isset($g['final_rating']) && $g['final_rating'] !== '' && $g['final_rating'] !== null ? round($g['final_rating']) : '-' ?></strong></td>
+                            <td><?= $all_quarters_filled && isset($g['remarks']) && $g['remarks'] !== '' && $g['remarks'] !== null ? htmlspecialchars($g['remarks']) : '-' ?></td>
                         </tr>
                         <?php endwhile; ?>
                         <!-- General Average Row -->
@@ -346,18 +365,28 @@ require_once '../templates/header.php';
                             // Compute GA finals to include
                             $ga_values = [];
 
-                            // Prefer aggregate MAPEH final if present
-                            if ($mapeh_agg_id !== null && isset($grades[$mapeh_agg_id]) && (!empty($grades[$mapeh_agg_id]['final_rating']) || $grades[$mapeh_agg_id]['final_rating'] === '0')) {
+                            // Helper: check all 4 quarters filled for a grade entry
+                            $allQFilled = function($g) {
+                                return $g && isset($g['q1'],$g['q2'],$g['q3'],$g['q4'])
+                                    && $g['q1'] !== '' && $g['q1'] !== null
+                                    && $g['q2'] !== '' && $g['q2'] !== null
+                                    && $g['q3'] !== '' && $g['q3'] !== null
+                                    && $g['q4'] !== '' && $g['q4'] !== null;
+                            };
+
+                            // Prefer aggregate MAPEH final if present and all 4 quarters filled
+                            if ($mapeh_agg_id !== null && isset($grades[$mapeh_agg_id]) && $allQFilled($grades[$mapeh_agg_id]) && (!empty($grades[$mapeh_agg_id]['final_rating']) || $grades[$mapeh_agg_id]['final_rating'] === '0')) {
                                 $ga_values[] = round(floatval($grades[$mapeh_agg_id]['final_rating']));
                             } elseif (!empty($mapeh_components)) {
-                                // If no aggregate, compute combined final for MAPEH from components
+                                // Only include MAPEH in GA when ALL 4 components each have all 4 quarters filled
                                 $mfinals = [];
                                 foreach ($mapeh_components as $cid) {
-                                    if (isset($grades[$cid]) && (!empty($grades[$cid]['final_rating']) || $grades[$cid]['final_rating'] === '0')) {
+                                    if (isset($grades[$cid]) && $allQFilled($grades[$cid]) && (!empty($grades[$cid]['final_rating']) || $grades[$cid]['final_rating'] === '0')) {
                                         $mfinals[] = round(floatval($grades[$cid]['final_rating']));
                                     }
                                 }
-                                if (!empty($mfinals)) {
+                                // Only add MAPEH to GA if all 4 components contributed
+                                if (count($mfinals) === count($mapeh_components) && count($mfinals) > 0) {
                                     $ga_values[] = round(array_sum($mfinals) / count($mfinals));
                                 }
                             }
@@ -369,7 +398,8 @@ require_once '../templates/header.php';
                                 if (isset($g['subject_name']) && strtolower(trim($g['subject_name'])) === 'general average') continue;
                                 if ($mapeh_agg_id !== null && $sid === $mapeh_agg_id) continue; // already included
                                 if (!empty($mapeh_components) && in_array($sid, $mapeh_components)) continue; // handled via combined value
-                                if (!empty($g['final_rating']) || (isset($g['final_rating']) && $g['final_rating'] === '0')) {
+                                // Only include subject if all 4 quarters are filled
+                                if ($allQFilled($g) && (!empty($g['final_rating']) || (isset($g['final_rating']) && $g['final_rating'] === '0'))) {
                                     $ga_values[] = round(floatval($g['final_rating']));
                                 }
                             }
@@ -461,7 +491,7 @@ require_once '../templates/header.php';
     <?php endif; ?>
 
 <div class="mt-2">
-    <a href="sf10_form.php" class="btn btn-secondary w-100">
+    <a href="sf10_form.php" class="btn btn-info w-100">
         <i class="bi bi-arrow-left"></i> Back to Selection
     </a>
 </div>
