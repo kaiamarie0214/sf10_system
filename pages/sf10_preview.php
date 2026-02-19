@@ -7,6 +7,8 @@ if (!isset($_SESSION['user'])) {
     exit();
 }
 
+$_SERVER['PHP_SELF'] = 'sf10_form.php';
+
 // Function to get subject name for a specific student
 function getSubjectNameForStudent($conn, $subject_id, $student_id, $school_attended_id) {
     // First, determine if this is a transfer student

@@ -35,6 +35,10 @@ html {
   --border-color: #e1e5eb;
   --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
   --hover-bg: #f0f2f5;
+  --card-bg: #ffffff;
+  --input-bg: #ffffff;
+  --input-border: #ced4da;
+  --input-text: #212529;
 }
 
 /* Mobile Menu Toggle (Hidden on desktop) */
@@ -1147,6 +1151,10 @@ body.dark-theme :root {
   --border-color: #3a3b3c;
   --hover-bg: #2d2f33;
   --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --card-bg: #1e1e2e;
+  --input-bg: #2d2f33;
+  --input-border: #555770;
+  --input-text: #ffffff;
 }
 
 /* Dark Theme - Topbar */
