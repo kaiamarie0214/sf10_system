@@ -622,6 +622,9 @@ $start_on_register = ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['act
                 <i class="bi bi-eye" id="loginEye"></i>
               </button>
             </div>
+            <div class="text-end mt-1">
+              <a href="forgot_password.php" class="text-decoration-none" style="font-size: 0.85rem; color: #449999;">Forgot Password?</a>
+            </div>
           </div>
 
           <button type="submit" class="btn btn-auth" form="loginForm">

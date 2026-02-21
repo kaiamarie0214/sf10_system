@@ -524,6 +524,14 @@ $needs_setup = $is_admin && empty($_SESSION['school_year_id']);
     </a>
   </div>
   <?php endif; ?>
+
+  <!-- Settings / 2FA -->
+  <div class="nav-section">
+    <a href="setup_2fa.php" class="nav-link <?= $current_page == 'setup_2fa' ? 'active' : '' ?>">
+      <i class="bi bi-shield-lock"></i> Security / 2FA
+    </a>
+  </div>
+
 </div>
 
 <!-- Form Submission Loading (Main Content Only) -->
