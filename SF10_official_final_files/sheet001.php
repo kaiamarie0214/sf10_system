@@ -434,6 +434,21 @@ body {
 }
 -->
 </style>
+<style>
+@media print {
+    @page {
+        size: 8.5in 13in;
+        margin: 0 !important;
+    }
+    html, body {
+        width: 8.5in !important;
+        height: 13in !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    header, footer { display: none !important; }
+}
+</style>
 <![if !supportTabStrip]><script language="JavaScript">
 <!--
 function fnUpdateTabs()

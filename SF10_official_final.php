@@ -17,6 +17,18 @@ xmlns="http://www.w3.org/TR/REC-html40">
 <meta name=Generator content="Microsoft Excel 15">
 <link rel=File-List href="SF10_official_final_files/filelist.xml">
 <title>School Form 10 ES Learners Permanent Record Final</title>
+<style>
+@media print {
+    @page {
+        size: 8.5in 13in;
+        margin: 0 !important;
+    }
+    html, body {
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+}
+</style>
 <![if !supportTabStrip]>
 
 <?php $student_id = isset($_GET['student_id']) ? intval($_GET['student_id']) : 0; ?>

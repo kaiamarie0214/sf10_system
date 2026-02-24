@@ -302,6 +302,49 @@ if ($current_school_year_id) {
 } else {
     $sy_filter = "AND 1=0"; // no school year active — show no assignments
 }
+
+// --- FILTERS & PAGINATION ---
+$search = $_GET['search'] ?? '';
+$sort = $_GET['sort'] ?? 'name-asc';
+$page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+$items_per_page = 20;
+
+// Build WHERE clause
+$where_conditions = [];
+$params = [];
+$types = "";
+
+if (!empty($search)) {
+    $where_conditions[] = "(u.full_name LIKE ? OR u.username LIKE ?)";
+    $search_param = "%$search%";
+    $params[] = $search_param;
+    $params[] = $search_param;
+    $types .= "ss";
+}
+
+$where_sql = !empty($where_conditions) ? "WHERE " . implode(" AND ", $where_conditions) : "";
+
+// Build ORDER BY clause
+$order_sql = "u.full_name ASC";
+switch ($sort) {
+    case 'name-asc': $order_sql = "u.full_name ASC"; break;
+    case 'name-desc': $order_sql = "u.full_name DESC"; break;
+    case 'role-admin': $order_sql = "u.role ASC, u.full_name ASC"; break;
+    case 'role-teacher': $order_sql = "u.role DESC, u.full_name ASC"; break;
+}
+
+// Get total count for pagination
+$count_query = "SELECT COUNT(DISTINCT u.id) as total FROM users u $where_sql";
+$stmt_count = $conn->prepare($count_query);
+if (!empty($params)) {
+    $stmt_count->bind_param($types, ...$params);
+}
+$stmt_count->execute();
+$total_users = $stmt_count->get_result()->fetch_assoc()['total'];
+$total_pages = ceil($total_users / $items_per_page);
+$page = max(1, min($total_pages, $page));
+$offset = ($page - 1) * $items_per_page;
+
 $users_query = "SELECT u.*, 
                 GROUP_CONCAT(DISTINCT CASE WHEN ta.assignment_type = 'adviser' 
                     THEN CONCAT('Grade ', ta.grade_level, ' - ', ta.section) END) as adviser_info,
@@ -310,9 +353,17 @@ $users_query = "SELECT u.*,
                 FROM users u
                 LEFT JOIN teacher_assignments ta ON u.id = ta.teacher_id $sy_filter
                 LEFT JOIN subjects s ON ta.subject_id = s.id
+                $where_sql
                 GROUP BY u.id
-                ORDER BY u.created_at DESC";
-$users = $conn->query($users_query);
+                ORDER BY $order_sql
+                LIMIT ? OFFSET ?";
+
+$stmt_users = $conn->prepare($users_query);
+$final_types = $types . "ii";
+$final_params = array_merge($params, [$items_per_page, $offset]);
+$stmt_users->bind_param($final_types, ...$final_params);
+$stmt_users->execute();
+$users = $stmt_users->get_result();
 
 // Get subjects for dropdown
 $subjects = $conn->query("SELECT id, subject_name FROM subjects ORDER BY subject_name");
@@ -442,6 +493,60 @@ document.addEventListener('DOMContentLoaded', function() {
     z-index: 10;
     background: var(--card-bg, #fff);
   }
+
+  .pagination-container {
+    flex-shrink: 0;
+    position: sticky;
+    bottom: 0;
+    z-index: 1000;
+    background: var(--card-bg);
+    border-top: 2px solid var(--border-color);
+    padding: 12px 15px;
+    box-shadow: 0 -2px 8px rgba(0,0,0,0.1);
+  }
+
+  body.dark-theme .pagination-container {
+    background: #242526;
+    border-top-color: #3a3b3c;
+    box-shadow: 0 -2px 8px rgba(0,0,0,0.3);
+  }
+
+  /* Mobile pagination adjustments */
+  @media (max-width: 768px) {
+    .pagination-container {
+      padding: 10px;
+    }
+    
+    .pagination-container .d-flex {
+      flex-direction: column;
+      gap: 10px;
+    }
+    
+    .pagination-container nav {
+      width: 100%;
+      overflow-x: auto;
+    }
+    
+    .pagination-container .pagination {
+      flex-wrap: nowrap;
+      justify-content: center;
+    }
+    
+    .pagination-container .page-item .page-link {
+      padding: 6px 10px;
+      font-size: 14px;
+    }
+    
+    .pagination-container .text-muted {
+      text-align: center;
+      font-size: 13px;
+    }
+    
+    /* Hide page jump on very small screens */
+    .pagination-container form {
+      display: none;
+    }
+  }
   
   /* Mobile responsive - enable horizontal scroll */
   @media (max-width: 768px) {
@@ -460,19 +565,19 @@ document.addEventListener('DOMContentLoaded', function() {
   <div class="card-header d-flex justify-content-between align-items-center">
     <span>
       <i class="bi bi-people"></i> All Users
-      <span class="badge bg-primary ms-2" id="userCount">0</span>
+      <span class="badge bg-primary ms-2" id="userCount"><?= number_format($total_users) ?></span>
     </span>
     <div class="d-flex gap-2">
       <select id="sortUsers" class="form-select form-select-sm" style="width: auto;">
-        <option value="name-asc">Name (A-Z)</option>
-        <option value="name-desc">Name (Z-A)</option>
-        <option value="role-admin">Admin First</option>
-        <option value="role-teacher">Teacher First</option>
+        <option value="name-asc" <?= $sort === 'name-asc' ? 'selected' : '' ?>>Name (A-Z)</option>
+        <option value="name-desc" <?= $sort === 'name-desc' ? 'selected' : '' ?>>Name (Z-A)</option>
+        <option value="role-admin" <?= $sort === 'role-admin' ? 'selected' : '' ?>>Admin First</option>
+        <option value="role-teacher" <?= $sort === 'role-teacher' ? 'selected' : '' ?>>Teacher First</option>
       </select>
       <div style="position: relative; width: 250px;">
         <i class="bi bi-search" style="position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: #6c757d; pointer-events: none;"></i>
-        <input type="text" class="form-control form-control-sm" id="userSearch" placeholder="Search by name or username..." style="padding-left: 35px; padding-right: 30px;">
-        <button type="button" id="clearUserSearch" class="btn btn-sm" style="position: absolute; right: 5px; top: 50%; transform: translateY(-50%); padding: 0; width: 20px; height: 20px; border: none; background: transparent; display: none;">
+        <input type="text" class="form-control form-control-sm" id="userSearch" placeholder="Search by name or username..." value="<?= htmlspecialchars($search) ?>" style="padding-left: 35px; padding-right: 30px;">
+        <button type="button" id="clearUserSearch" class="btn btn-sm" style="position: absolute; right: 5px; top: 50%; transform: translateY(-50%); padding: 0; width: 20px; height: 20px; border: none; background: transparent; <?= empty($search) ? 'display: none;' : 'display: block;' ?>">
           <i class="bi bi-x-circle-fill" style="color: #6c757d;"></i>
         </button>
       </div>
@@ -480,7 +585,7 @@ document.addEventListener('DOMContentLoaded', function() {
   </div>
   <div class="card-body">
     <div class="table-responsive">
-      <table class="table table-hover" id="usersTable">
+      <table class="table table-hover mb-0" id="usersTable">
         <thead>
           <tr>
             <th>Full Name</th>
@@ -491,63 +596,156 @@ document.addEventListener('DOMContentLoaded', function() {
           </tr>
         </thead>
         <tbody>
-          <?php while($u = $users->fetch_assoc()): ?>
-          <tr class="user-row"
-              data-name="<?= htmlspecialchars($u['full_name']) ?>"
-              data-username="<?= htmlspecialchars($u['username']) ?>"
-              data-role="<?= htmlspecialchars($u['role']) ?>">
-            <td>
-              <i class="bi bi-person-circle"></i> <?= htmlspecialchars(strtoupper($u['full_name'])) ?>
-            </td>
-            <td><?= htmlspecialchars($u['username']) ?></td>
-            <td>
-              <?php if ($u['role'] === 'admin'): ?>
-                <span class="badge bg-danger">Admin</span>
-              <?php else: ?>
-                <span class="badge bg-primary">Teacher</span>
-              <?php endif; ?>
-            </td>
-            <td>
-              <?php if ($u['adviser_info']): ?>
-                <span class="badge bg-warning text-dark"><?= htmlspecialchars($u['adviser_info']) ?></span>
-              <?php else: ?>
-                <span class="text-muted">-</span>
-              <?php endif; ?>
-            </td>
-            <td>
-              <div class="dropdown" style="position: static;">
-                <button class="btn btn-sm btn-secondary dropdown-toggle" type="button" id="actionsDropdown<?= $u['id'] ?>" data-bs-toggle="dropdown" aria-expanded="false">
-                  <i class="bi bi-three-dots-vertical"></i>
-                </button>
-                <ul class="dropdown-menu dropdown-menu-end shadow" aria-labelledby="actionsDropdown<?= $u['id'] ?>" style="z-index: 1050;">
-                  <li><a class="dropdown-item" href="view_user.php?id=<?= $u['id'] ?>">
-                    <i class="bi bi-eye text-info me-2"></i>View Details
-                  </a></li>
-                  <li><hr class="dropdown-divider"></li>
-                  <li><a class="dropdown-item" href="edit_user.php?id=<?= $u['id'] ?>">
-                    <i class="bi bi-pencil text-warning me-2"></i>Edit User
-                  </a></li>
-                  <li><hr class="dropdown-divider"></li>
-                  <?php if ($u['role'] === 'admin'): ?>
-                    <li title="Cannot delete admin. Change role to teacher first.">
-                      <a class="dropdown-item text-muted disabled" href="javascript:void(0)" style="cursor: not-allowed; pointer-events: auto;">
-                        <i class="bi bi-trash me-2"></i>(Disabled)
-                      </a>
-                    </li>
-                  <?php else: ?>
-                    <li><a class="dropdown-item text-danger" href="javascript:void(0)" onclick='deleteUserConfirm(<?= $u["id"] ?>, "<?= htmlspecialchars($u["full_name"]) ?>")'>
-                      <i class="bi bi-trash me-2"></i>Delete User
+          <?php if ($users->num_rows > 0): ?>
+            <?php while($u = $users->fetch_assoc()): ?>
+            <tr class="user-row">
+              <td>
+                <i class="bi bi-person-circle"></i> <?= htmlspecialchars(strtoupper($u['full_name'])) ?>
+              </td>
+              <td><?= htmlspecialchars($u['username']) ?></td>
+              <td>
+                <?php if ($u['role'] === 'admin'): ?>
+                  <span class="badge bg-danger">Admin</span>
+                <?php else: ?>
+                  <span class="badge bg-primary">Teacher</span>
+                <?php endif; ?>
+              </td>
+              <td>
+                <?php if ($u['adviser_info']): ?>
+                  <span class="badge bg-warning text-dark"><?= htmlspecialchars($u['adviser_info']) ?></span>
+                <?php else: ?>
+                  <span class="text-muted">-</span>
+                <?php endif; ?>
+              </td>
+              <td>
+                <div class="dropdown" style="position: static;">
+                  <button class="btn btn-sm btn-secondary dropdown-toggle" type="button" id="actionsDropdown<?= $u['id'] ?>" data-bs-toggle="dropdown" aria-expanded="false">
+                    <i class="bi bi-three-dots-vertical"></i>
+                  </button>
+                  <ul class="dropdown-menu dropdown-menu-end shadow" aria-labelledby="actionsDropdown<?= $u['id'] ?>" style="z-index: 1050;">
+                    <li><a class="dropdown-item" href="view_user.php?id=<?= $u['id'] ?>">
+                      <i class="bi bi-eye text-info me-2"></i>View Details
                     </a></li>
-                  <?php endif; ?>
-                </ul>
-              </div>
-            </td>
-          </tr>
-          <?php endwhile; ?>
+                    <li><hr class="dropdown-divider"></li>
+                    <li><a class="dropdown-item" href="edit_user.php?id=<?= $u['id'] ?>">
+                      <i class="bi bi-pencil text-warning me-2"></i>Edit User
+                    </a></li>
+                    <li><hr class="dropdown-divider"></li>
+                    <?php if ($u['role'] === 'admin'): ?>
+                      <li title="Cannot delete admin. Change role to teacher first.">
+                        <a class="dropdown-item text-muted disabled" href="javascript:void(0)" style="cursor: not-allowed; pointer-events: auto;">
+                          <i class="bi bi-trash me-2"></i>(Disabled)
+                        </a>
+                      </li>
+                    <?php else: ?>
+                      <li><a class="dropdown-item text-danger" href="javascript:void(0)" onclick='deleteUserConfirm(<?= $u["id"] ?>, "<?= htmlspecialchars($u["full_name"]) ?>")'>
+                        <i class="bi bi-trash me-2"></i>Delete User
+                      </a></li>
+                    <?php endif; ?>
+                  </ul>
+                </div>
+              </td>
+            </tr>
+            <?php endwhile; ?>
+          <?php else: ?>
+            <tr>
+              <td colspan="5" class="text-center py-4 text-muted">
+                <i class="bi bi-search" style="font-size: 2rem; opacity: 0.3;"></i>
+                <p class="mt-2 mb-0">No users found matching your criteria</p>
+              </td>
+            </tr>
+          <?php endif; ?>
         </tbody>
       </table>
     </div>
   </div>
+
+  <!-- Pagination -->
+  <?php if ($total_users > 0): ?>
+  <div class="pagination-container">
+    <div class="d-flex justify-content-between align-items-center">
+      <div class="text-muted">
+        Page <?= $page ?> of <?= max(1, $total_pages) ?>
+      </div>
+      
+      <nav aria-label="Page navigation">
+        <ul class="pagination mb-0">
+          <!-- First Page -->
+          <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+            <a class="page-link" href="?page=1&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>" title="First Page">
+              <i class="bi bi-chevron-double-left"></i>
+            </a>
+          </li>
+          
+          <!-- Previous Page -->
+          <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+            <a class="page-link" href="?page=<?= max(1, $page - 1) ?>&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>">Previous</a>
+          </li>
+          
+          <!-- Page Numbers -->
+          <?php
+          $start_page = max(1, $page - 2);
+          $end_page = min(max(1, $total_pages), $start_page + 4);
+          $start_page = max(1, $end_page - 4);
+          
+          for($i = $start_page; $i <= $end_page; $i++): 
+          ?>
+          <li class="page-item <?= $i == $page ? 'active' : '' ?>">
+            <a class="page-link" href="?page=<?= $i ?>&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>"><?= $i ?></a>
+          </li>
+          <?php endfor; ?>
+          
+          <!-- Next Page -->
+          <li class="page-item <?= $page >= $total_pages ? 'disabled' : '' ?>">
+            <a class="page-link" href="?page=<?= min($total_pages, $page + 1) ?>&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>">Next</a>
+          </li>
+          
+          <!-- Last Page -->
+          <li class="page-item <?= $page >= $total_pages ? 'disabled' : '' ?>">
+            <a class="page-link" href="?page=<?= max(1, $total_pages) ?>&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>" title="Last Page">
+              <i class="bi bi-chevron-double-right"></i>
+            </a>
+          </li>
+        </ul>
+      </nav>
+      
+      <!-- Custom Page Jump -->
+      <div class="d-flex align-items-center gap-2">
+        <span class="text-muted small">Go to:</span>
+        <form method="GET" class="d-flex gap-2" onsubmit="return validatePageJump()">
+          <input type="hidden" name="search" value="<?= htmlspecialchars($search) ?>">
+          <input type="hidden" name="sort" value="<?= htmlspecialchars($sort) ?>">
+          <input type="number" 
+                 name="page" 
+                 id="pageJump"
+                 class="form-control form-control-sm" 
+                 style="width: 70px;" 
+                 min="1" 
+                 max="<?= max(1, $total_pages) ?>"
+                 placeholder="<?= $page ?>"
+                 title="Enter page number (1-<?= max(1, $total_pages) ?>)">
+          <button type="submit" class="btn btn-sm btn-primary">
+            <i class="bi bi-arrow-right"></i>
+          </button>
+        </form>
+      </div>
+    </div>
+    
+    <script>
+    function validatePageJump() {
+        const input = document.getElementById('pageJump');
+        const value = parseInt(input.value);
+        const max = parseInt(input.max);
+        
+        if (!value || value < 1 || value > max) {
+            alert('Please enter a valid page number between 1 and ' + max);
+            return false;
+        }
+        return true;
+    }
+    </script>
+  </div>
+  <?php endif; ?>
 </div>
 
 <script>
@@ -556,76 +754,34 @@ document.addEventListener('DOMContentLoaded', function() {
     const searchInput = document.getElementById('userSearch');
     const clearSearchBtn = document.getElementById('clearUserSearch');
     const sortSelect = document.getElementById('sortUsers');
-    const tableBody = document.querySelector('#usersTable tbody');
-    const userRows = Array.from(tableBody.querySelectorAll('.user-row'));
     
-    function updateUserCount() {
-      const visible = userRows.filter(r => window.getComputedStyle(r).display !== 'none').length;
-      const badge = document.getElementById('userCount');
-      if (badge) badge.textContent = visible;
+    function updateTable() {
+        const q = searchInput ? searchInput.value.trim() : '';
+        const s = sortSelect ? sortSelect.value : 'name-asc';
+        window.location.href = `users.php?page=1&search=${encodeURIComponent(q)}&sort=${encodeURIComponent(s)}`;
     }
 
-    if (searchInput && clearSearchBtn) {
-        // Show/hide clear button based on input value
+    if (searchInput) {
+        let searchTimeout;
         searchInput.addEventListener('input', function() {
-            const searchTerm = this.value.toLowerCase().trim();
-            clearSearchBtn.style.display = this.value ? 'block' : 'none';
+            if (clearSearchBtn) clearSearchBtn.style.display = this.value ? 'block' : 'none';
             
-            userRows.forEach(row => {
-                const name = row.getAttribute('data-name').toLowerCase();
-                const username = row.getAttribute('data-username').toLowerCase();
-                
-                if (name.includes(searchTerm) || username.includes(searchTerm)) {
-                    row.style.display = '';
-                } else {
-                    row.style.display = 'none';
-                }
-            });
-            updateUserCount();
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(updateTable, 800);
         });
         
-        // Clear search input when X button is clicked
-        clearSearchBtn.addEventListener('click', function() {
-            searchInput.value = '';
-            clearSearchBtn.style.display = 'none';
-            userRows.forEach(row => row.style.display = '');
-          updateUserCount();
-        });
+        if (clearSearchBtn) {
+            clearSearchBtn.addEventListener('click', function() {
+                searchInput.value = '';
+                this.style.display = 'none';
+                updateTable();
+            });
+        }
     }
     
-    // Sort functionality
     if (sortSelect) {
-        sortSelect.addEventListener('change', function() {
-            const sortType = this.value;
-            let sortedRows = [...userRows];
-            
-            sortedRows.sort((a, b) => {
-                if (sortType === 'name-asc') {
-                    return a.getAttribute('data-name').localeCompare(b.getAttribute('data-name'));
-                } else if (sortType === 'name-desc') {
-                    return b.getAttribute('data-name').localeCompare(a.getAttribute('data-name'));
-                } else if (sortType === 'role-admin') {
-                    const aRole = a.getAttribute('data-role');
-                    const bRole = b.getAttribute('data-role');
-                    if (aRole === 'admin' && bRole !== 'admin') return -1;
-                    if (aRole !== 'admin' && bRole === 'admin') return 1;
-                    return a.getAttribute('data-name').localeCompare(b.getAttribute('data-name'));
-                } else if (sortType === 'role-teacher') {
-                    const aRole = a.getAttribute('data-role');
-                    const bRole = b.getAttribute('data-role');
-                    if (aRole === 'teacher' && bRole !== 'teacher') return -1;
-                    if (aRole !== 'teacher' && bRole === 'teacher') return 1;
-                    return a.getAttribute('data-name').localeCompare(b.getAttribute('data-name'));
-                }
-            });
-            
-            // Re-append rows in sorted order
-            sortedRows.forEach(row => tableBody.appendChild(row));
-            updateUserCount();
-        });
+        sortSelect.addEventListener('change', updateTable);
     }
-        // initial count
-        updateUserCount();
 })();
 </script>
 

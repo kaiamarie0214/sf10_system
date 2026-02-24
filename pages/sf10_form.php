@@ -13,9 +13,70 @@ if ($user['role'] !== 'admin') {
     exit();
 }
 
-// Get all students with their current grade/section from latest school record
+// --- FILTERS & PAGINATION ---
+$search = $_GET['search'] ?? '';
+$sort = $_GET['sort'] ?? 'name-asc';
+$page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+$items_per_page = 20;
+
+// Build WHERE clause
+$where_conditions = [];
+$params = [];
+$types = "";
+
+if (!empty($search)) {
+    $where_conditions[] = "(s.last_name LIKE ? OR s.first_name LIKE ? OR s.lrn LIKE ?)";
+    $search_param = "%$search%";
+    $params[] = $search_param;
+    $params[] = $search_param;
+    $params[] = $search_param;
+    $types .= "sss";
+}
+
+if ($sort === 'filter-male') {
+    $where_conditions[] = "s.gender = 'Male'";
+} elseif ($sort === 'filter-female') {
+    $where_conditions[] = "s.gender = 'Female'";
+}
+
+$where_sql = !empty($where_conditions) ? "WHERE " . implode(" AND ", $where_conditions) : "";
+
+// Build ORDER BY clause
+$order_sql = "s.last_name, s.first_name";
+switch ($sort) {
+    case 'name-asc': $order_sql = "s.last_name ASC, s.first_name ASC"; break;
+    case 'name-desc': $order_sql = "s.last_name DESC, s.first_name DESC"; break;
+    case 'grade-asc': $order_sql = "sa.grade_level ASC, sa.section ASC"; break;
+    case 'grade-desc': $order_sql = "sa.grade_level DESC, sa.section DESC"; break;
+    case 'gender-male': $order_sql = "s.gender DESC, s.last_name ASC"; break;
+    case 'gender-female': $order_sql = "s.gender ASC, s.last_name ASC"; break;
+}
+
+// Get total count for pagination
+$count_query = "SELECT COUNT(DISTINCT s.id) as total 
+                FROM students s 
+                LEFT JOIN schools_attended sa ON s.id = sa.student_id
+                AND sa.id = (
+                    SELECT id FROM schools_attended 
+                    WHERE student_id = s.id 
+                    ORDER BY grade_level DESC, school_year DESC 
+                    LIMIT 1
+                )
+                $where_sql";
+
+$stmt = $conn->prepare($count_query);
+if (!empty($params)) {
+    $stmt->bind_param($types, ...$params);
+}
+$stmt->execute();
+$total_students = $stmt->get_result()->fetch_assoc()['total'];
+$total_pages = ceil($total_students / $items_per_page);
+$page = max(1, min($total_pages, $page));
+$offset = ($page - 1) * $items_per_page;
+
+// Get students with latest school record
 $students_query = "SELECT s.id, s.first_name, s.last_name, s.middle_name, s.lrn, s.gender, s.birthdate,
-                   sa.grade_level, sa.section
+                          sa.grade_level, sa.section
                    FROM students s
                    LEFT JOIN schools_attended sa ON s.id = sa.student_id
                    AND sa.id = (
@@ -24,8 +85,16 @@ $students_query = "SELECT s.id, s.first_name, s.last_name, s.middle_name, s.lrn,
                        ORDER BY grade_level DESC, school_year DESC 
                        LIMIT 1
                    )
-                   ORDER BY s.last_name, s.first_name";
-$students = $conn->query($students_query);
+                   $where_sql
+                   ORDER BY $order_sql
+                   LIMIT ? OFFSET ?";
+
+$stmt = $conn->prepare($students_query);
+$final_types = $types . "ii";
+$final_params = array_merge($params, [$items_per_page, $offset]);
+$stmt->bind_param($final_types, ...$final_params);
+$stmt->execute();
+$students = $stmt->get_result();
 
 // Get all school years
 $school_years_query = "SELECT DISTINCT school_year FROM schools_attended ORDER BY school_year DESC";
@@ -150,30 +219,83 @@ document.addEventListener('DOMContentLoaded', function() {
     z-index: 10;
     background: var(--card-bg, #fff);
   }
+
+  .pagination-container {
+    flex-shrink: 0;
+    position: sticky;
+    bottom: 0;
+    z-index: 1000;
+    background: var(--card-bg);
+    border-top: 2px solid var(--border-color);
+    padding: 12px 15px;
+    box-shadow: 0 -2px 8px rgba(0,0,0,0.1);
+  }
+
+  body.dark-theme .pagination-container {
+    background: #242526;
+    border-top-color: #3a3b3c;
+    box-shadow: 0 -2px 8px rgba(0,0,0,0.3);
+  }
+
+  /* Mobile pagination adjustments */
+  @media (max-width: 768px) {
+    .pagination-container {
+      padding: 10px;
+    }
+    
+    .pagination-container .d-flex {
+      flex-direction: column;
+      gap: 10px;
+    }
+    
+    .pagination-container nav {
+      width: 100%;
+      overflow-x: auto;
+    }
+    
+    .pagination-container .pagination {
+      flex-wrap: nowrap;
+      justify-content: center;
+    }
+    
+    .pagination-container .page-item .page-link {
+      padding: 6px 10px;
+      font-size: 14px;
+    }
+    
+    .pagination-container .text-muted {
+      text-align: center;
+      font-size: 13px;
+    }
+    
+    /* Hide page jump on very small screens */
+    .pagination-container form {
+      display: none;
+    }
+  }
 </style>
 
 <div class="card">
     <div class="card-header d-flex justify-content-between align-items-center">
         <span>
             <i class="bi bi-file-earmark-excel"></i> SF10 Form Generator
-            <span class="badge bg-secondary ms-2" id="studentCount">0</span>
+            <span class="badge bg-secondary ms-2" id="studentCount"><?= number_format($total_students) ?></span>
         </span>
         <div class="d-flex gap-2">
             <select id="sortStudents" class="form-select form-select-sm" style="width: auto;">
-                <option value="all">All Students</option>
-                <option value="name-asc">Name (A-Z)</option>
-                <option value="name-desc">Name (Z-A)</option>
-                <option value="grade-asc">Grade Level (1-6)</option>
-                <option value="grade-desc">Grade Level (6-1)</option>
-                <option value="gender-male">Gender (Male First)</option>
-                <option value="gender-female">Gender (Female First)</option>
-                <option value="filter-male">All Male</option>
-                <option value="filter-female">All Female</option>
+                <option value="name-asc" <?= $sort === 'name-asc' ? 'selected' : '' ?>>Name (A-Z)</option>
+                <option value="name-desc" <?= $sort === 'name-desc' ? 'selected' : '' ?>>Name (Z-A)</option>
+                <option value="grade-asc" <?= $sort === 'grade-asc' ? 'selected' : '' ?>>Grade Level (1-6)</option>
+                <option value="grade-desc" <?= $sort === 'grade-desc' ? 'selected' : '' ?>>Grade Level (6-1)</option>
+                <option value="gender-male" <?= $sort === 'gender-male' ? 'selected' : '' ?>>Gender (Male First)</option>
+                <option value="gender-female" <?= $sort === 'gender-female' ? 'selected' : '' ?>>Gender (Female First)</option>
+                <option value="filter-male" <?= $sort === 'filter-male' ? 'selected' : '' ?>>All Male</option>
+                <option value="filter-female" <?= $sort === 'filter-female' ? 'selected' : '' ?>>All Female</option>
             </select>
             <div style="position: relative; width: 250px;">
                 <i class="bi bi-search" style="position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: #6c757d; pointer-events: none;"></i>
-                <input type="text" class="form-control form-control-sm" id="student_search" placeholder="Search by name or LRN..." style="padding-left: 35px; padding-right: 30px;">
-                <button type="button" id="clearStudentSearch" class="btn btn-sm" style="position: absolute; right: 5px; top: 50%; transform: translateY(-50%); padding: 0; width: 20px; height: 20px; border: none; background: transparent; display: none;">
+                <input type="text" class="form-control form-control-sm" id="student_search" placeholder="Search by name or LRN..." value="<?= htmlspecialchars($search) ?>" style="padding-left: 35px; padding-right: 30px;">
+                <button type="button" id="clearStudentSearch" class="btn btn-sm" style="position: absolute; right: 5px; top: 50%; transform: translateY(-50%); padding: 0; width: 20px; height: 20px; border: none; background: transparent; <?= empty($search) ? 'display: none;' : 'display: block;' ?>">
                     <i class="bi bi-x-circle-fill" style="color: #6c757d;"></i>
                 </button>
             </div>
@@ -196,30 +318,122 @@ document.addEventListener('DOMContentLoaded', function() {
                     </tr>
                 </thead>
                 <tbody>
-                    <?php while ($student = $students->fetch_assoc()): 
-                        $fullName = strtoupper($student['last_name'] . ', ' . $student['first_name'] . ' ' . ($student['middle_name'] ?? ''));
-                        $gradeSection = $student['grade_level'] 
-                            ? $student['grade_level'] . ($student['section'] ? ' - ' . $student['section'] : '') 
-                            : 'N/A';
-                    ?>
-                    <tr style="cursor: pointer;" 
-                        onclick="previewStudent(<?= $student['id'] ?>)"
-                        class="student-row"
-                        data-name="<?= htmlspecialchars(strtolower($fullName)) ?>"
-                        data-lrn="<?= htmlspecialchars($student['lrn']) ?>"
-                        data-gender="<?= htmlspecialchars(strtolower($student['gender'])) ?>"
-                        data-grade="<?= $student['grade_level'] ?? '0' ?>">
-                        <td><?= htmlspecialchars($student['lrn']) ?></td>
-                        <td><?= htmlspecialchars($fullName) ?></td>
-                        <td><?= htmlspecialchars(ucfirst($student['gender'])) ?></td>
-                        <td><?= date('M d, Y', strtotime($student['birthdate'])) ?></td>
-                        <td><?= htmlspecialchars($gradeSection) ?></td>
-                    </tr>
-                    <?php endwhile; ?>
+                    <?php if ($students->num_rows > 0): ?>
+                        <?php while ($student = $students->fetch_assoc()): 
+                            $fullName = strtoupper($student['last_name'] . ', ' . $student['first_name'] . ' ' . ($student['middle_name'] ?? ''));
+                            $gradeSection = $student['grade_level'] 
+                                ? $student['grade_level'] . ($student['section'] ? ' - ' . $student['section'] : '') 
+                                : 'N/A';
+                        ?>
+                        <tr style="cursor: pointer;" 
+                            onclick="previewStudent(<?= $student['id'] ?>)"
+                            class="student-row">
+                            <td><?= htmlspecialchars($student['lrn']) ?></td>
+                            <td><?= htmlspecialchars($fullName) ?></td>
+                            <td><?= htmlspecialchars(ucfirst($student['gender'])) ?></td>
+                            <td><?= date('M d, Y', strtotime($student['birthdate'])) ?></td>
+                            <td><?= htmlspecialchars($gradeSection) ?></td>
+                        </tr>
+                        <?php endwhile; ?>
+                    <?php else: ?>
+                        <tr>
+                            <td colspan="5" class="text-center py-4 text-muted">
+                                <i class="bi bi-search" style="font-size: 2rem; opacity: 0.3;"></i>
+                                <p class="mt-2 mb-0">No students found matching your criteria</p>
+                            </td>
+                        </tr>
+                    <?php endif; ?>
                 </tbody>
             </table>
         </div>
     </div>
+
+    <!-- Pagination -->
+    <?php if ($total_students > 0): ?>
+    <div class="pagination-container">
+        <div class="d-flex justify-content-between align-items-center">
+            <div class="text-muted">
+                Page <?= $page ?> of <?= max(1, $total_pages) ?>
+            </div>
+            
+            <nav aria-label="Page navigation">
+                <ul class="pagination mb-0">
+                    <!-- First Page -->
+                    <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+                        <a class="page-link" href="?page=1&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>" title="First Page">
+                            <i class="bi bi-chevron-double-left"></i>
+                        </a>
+                    </li>
+                    
+                    <!-- Previous Page -->
+                    <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+                        <a class="page-link" href="?page=<?= max(1, $page - 1) ?>&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>">Previous</a>
+                    </li>
+                    
+                    <!-- Page Numbers -->
+                    <?php
+                    $start_page = max(1, $page - 2);
+                    $end_page = min(max(1, $total_pages), $start_page + 4);
+                    $start_page = max(1, $end_page - 4);
+                    
+                    for($i = $start_page; $i <= $end_page; $i++): 
+                    ?>
+                    <li class="page-item <?= $i == $page ? 'active' : '' ?>">
+                        <a class="page-link" href="?page=<?= $i ?>&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>"><?= $i ?></a>
+                    </li>
+                    <?php endfor; ?>
+                    
+                    <!-- Next Page -->
+                    <li class="page-item <?= $page >= $total_pages ? 'disabled' : '' ?>">
+                        <a class="page-link" href="?page=<?= min($total_pages, $page + 1) ?>&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>">Next</a>
+                    </li>
+                    
+                    <!-- Last Page -->
+                    <li class="page-item <?= $page >= $total_pages ? 'disabled' : '' ?>">
+                        <a class="page-link" href="?page=<?= max(1, $total_pages) ?>&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>" title="Last Page">
+                            <i class="bi bi-chevron-double-right"></i>
+                        </a>
+                    </li>
+                </ul>
+            </nav>
+            
+            <!-- Custom Page Jump -->
+            <div class="d-flex align-items-center gap-2">
+                <span class="text-muted small">Go to:</span>
+                <form method="GET" class="d-flex gap-2" onsubmit="return validatePageJump()">
+                    <input type="hidden" name="search" value="<?= htmlspecialchars($search) ?>">
+                    <input type="hidden" name="sort" value="<?= htmlspecialchars($sort) ?>">
+                    <input type="number" 
+                           name="page" 
+                           id="pageJump"
+                           class="form-control form-control-sm" 
+                           style="width: 70px;" 
+                           min="1" 
+                           max="<?= max(1, $total_pages) ?>"
+                           placeholder="<?= $page ?>"
+                           title="Enter page number (1-<?= max(1, $total_pages) ?>)">
+                    <button type="submit" class="btn btn-sm btn-primary">
+                        <i class="bi bi-arrow-right"></i>
+                    </button>
+                </form>
+            </div>
+        </div>
+        
+        <script>
+        function validatePageJump() {
+            const input = document.getElementById('pageJump');
+            const value = parseInt(input.value);
+            const max = parseInt(input.max);
+            
+            if (!value || value < 1 || value > max) {
+                alert('Please enter a valid page number between 1 and ' + max);
+                return false;
+            }
+            return true;
+        }
+        </script>
+    </div>
+    <?php endif; ?>
 </div>
 
 <script>
@@ -253,106 +467,35 @@ document.addEventListener('DOMContentLoaded', function() {
     // Search and filter functionality
     const searchInput = document.getElementById('student_search');
     const clearBtn = document.getElementById('clearStudentSearch');
-    const tableRows = document.querySelectorAll('#studentsTable tbody .student-row');
-    const studentCount = document.getElementById('studentCount');
+    const sortSelect = document.getElementById('sortStudents');
     
-    function updateStudentCount() {
-        const visibleRows = Array.from(tableRows).filter(row => row.style.display !== 'none');
-        const count = visibleRows.length;
-        studentCount.textContent = count;
-        
-        // Change badge color based on count
-        if (count > 0) {
-            studentCount.classList.remove('bg-secondary');
-            studentCount.classList.add('bg-primary');
-        } else {
-            studentCount.classList.remove('bg-primary');
-            studentCount.classList.add('bg-secondary');
-        }
+    function updateTable() {
+        const q = searchInput.value.trim();
+        const s = sortSelect.value;
+        window.location.href = `sf10_form.php?page=1&search=${encodeURIComponent(q)}&sort=${encodeURIComponent(s)}`;
     }
     
-    function performSearch() {
-        const searchTerm = searchInput.value.toLowerCase().trim();
-        const sortValue = document.getElementById('sortStudents').value;
-        
-        let visibleRows = [];
-        
-        tableRows.forEach(row => {
-            const name = row.getAttribute('data-name') || '';
-            const lrn = row.getAttribute('data-lrn')?.toLowerCase() || '';
-            const gender = row.getAttribute('data-gender')?.toLowerCase() || '';
+    if (searchInput) {
+        let searchTimeout;
+        searchInput.addEventListener('input', function() {
+            if (clearBtn) clearBtn.style.display = this.value ? 'block' : 'none';
             
-            // Apply filter first
-            let matchesFilter = true;
-            if (sortValue === 'filter-male' && gender !== 'male') {
-                matchesFilter = false;
-            } else if (sortValue === 'filter-female' && gender !== 'female') {
-                matchesFilter = false;
-            }
-            
-            // Apply search
-            const matchesSearch = searchTerm === '' || name.includes(searchTerm) || lrn.includes(searchTerm);
-            
-            if (matchesFilter && matchesSearch) {
-                row.style.display = '';
-                visibleRows.push(row);
-            } else {
-                row.style.display = 'none';
-            }
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(updateTable, 800);
         });
-        
-        // Apply sorting to visible rows
-        if (sortValue && sortValue !== 'all' && !sortValue.startsWith('filter-')) {
-            visibleRows.sort((a, b) => {
-                const nameA = a.getAttribute('data-name') || '';
-                const nameB = b.getAttribute('data-name') || '';
-                const gradeA = parseInt(a.getAttribute('data-grade')) || 0;
-                const gradeB = parseInt(b.getAttribute('data-grade')) || 0;
-                const genderA = a.getAttribute('data-gender') || '';
-                const genderB = b.getAttribute('data-gender') || '';
-                
-                switch(sortValue) {
-                    case 'name-asc':
-                        return nameA.localeCompare(nameB);
-                    case 'name-desc':
-                        return nameB.localeCompare(nameA);
-                    case 'grade-asc':
-                        return gradeA - gradeB;
-                    case 'grade-desc':
-                        return gradeB - gradeA;
-                    case 'gender-male':
-                        if (genderA === 'male' && genderB !== 'male') return -1;
-                        if (genderA !== 'male' && genderB === 'male') return 1;
-                        return nameA.localeCompare(nameB);
-                    case 'gender-female':
-                        if (genderA === 'female' && genderB !== 'female') return -1;
-                        if (genderA !== 'female' && genderB === 'female') return 1;
-                        return nameA.localeCompare(nameB);
-                }
-                return 0;
-            });
-            
-            const tbody = document.querySelector('#studentsTable tbody');
-            visibleRows.forEach(row => tbody.appendChild(row));
-        }
-        
-        clearBtn.style.display = searchTerm ? 'block' : 'none';
-        updateStudentCount();
     }
     
-    searchInput.addEventListener('input', performSearch);
+    if (clearBtn) {
+        clearBtn.addEventListener('click', function() {
+            searchInput.value = '';
+            this.style.display = 'none';
+            updateTable();
+        });
+    }
     
-    clearBtn.addEventListener('click', function() {
-        searchInput.value = '';
-        performSearch();
-        searchInput.focus();
-    });
-    
-    // Sorting functionality
-    document.getElementById('sortStudents').addEventListener('change', performSearch);
-    
-    // Initialize count on page load
-    updateStudentCount();
+    if (sortSelect) {
+        sortSelect.addEventListener('change', updateTable);
+    }
 });
 </script>
 

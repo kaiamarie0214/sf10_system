@@ -89,8 +89,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// Get all school years
-$school_years = $conn->query("SELECT * FROM school_years ORDER BY year DESC")->fetch_all(MYSQLI_ASSOC);
+// --- FILTERS & PAGINATION ---
+$search = $_GET['search'] ?? '';
+$sort = $_GET['sort'] ?? 'year-desc';
+$page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+$items_per_page = 20;
+
+// Build WHERE clause
+$where_conditions = [];
+$params = [];
+$types = "";
+
+if (!empty($search)) {
+    $where_conditions[] = "(year LIKE ?)";
+    $search_param = "%$search%";
+    $params[] = $search_param;
+    $types .= "s";
+}
+
+$where_sql = !empty($where_conditions) ? "WHERE " . implode(" AND ", $where_conditions) : "";
+
+// Build ORDER BY clause
+$order_sql = "year DESC";
+switch ($sort) {
+    case 'year-asc': $order_sql = "year ASC"; break;
+    case 'year-desc': $order_sql = "year DESC"; break;
+    case 'status-active': $order_sql = "status ASC, year DESC"; break;
+    case 'status-inactive': $order_sql = "status DESC, year DESC"; break;
+}
+
+// Get total count for pagination
+$count_query = "SELECT COUNT(*) as total FROM school_years $where_sql";
+$stmt_count = $conn->prepare($count_query);
+if (!empty($params)) {
+    $stmt_count->bind_param($types, ...$params);
+}
+$stmt_count->execute();
+$total_sy = $stmt_count->get_result()->fetch_assoc()['total'];
+$total_pages = ceil($total_sy / $items_per_page);
+$page = max(1, min($total_pages, $page));
+$offset = ($page - 1) * $items_per_page;
+
+// Get school years with pagination
+$sy_query = "SELECT * FROM school_years $where_sql ORDER BY $order_sql LIMIT ? OFFSET ?";
+$stmt_sy = $conn->prepare($sy_query);
+$final_types = $types . "ii";
+$final_params = array_merge($params, [$items_per_page, $offset]);
+$stmt_sy->bind_param($final_types, ...$final_params);
+$stmt_sy->execute();
+$school_years = $stmt_sy->get_result()->fetch_all(MYSQLI_ASSOC);
 
 // Set current page for sidebar navigation
 $_SERVER['PHP_SELF'] = 'school_years.php';
@@ -222,6 +269,60 @@ document.addEventListener('DOMContentLoaded', function() {
     z-index: 10;
     background: var(--card-bg, #fff);
   }
+
+  .pagination-container {
+    flex-shrink: 0;
+    position: sticky;
+    bottom: 0;
+    z-index: 1000;
+    background: var(--card-bg);
+    border-top: 2px solid var(--border-color);
+    padding: 12px 15px;
+    box-shadow: 0 -2px 8px rgba(0,0,0,0.1);
+  }
+
+  body.dark-theme .pagination-container {
+    background: #242526;
+    border-top-color: #3a3b3c;
+    box-shadow: 0 -2px 8px rgba(0,0,0,0.3);
+  }
+
+  /* Mobile pagination adjustments */
+  @media (max-width: 768px) {
+    .pagination-container {
+      padding: 10px;
+    }
+    
+    .pagination-container .d-flex {
+      flex-direction: column;
+      gap: 10px;
+    }
+    
+    .pagination-container nav {
+      width: 100%;
+      overflow-x: auto;
+    }
+    
+    .pagination-container .pagination {
+      flex-wrap: nowrap;
+      justify-content: center;
+    }
+    
+    .pagination-container .page-item .page-link {
+      padding: 6px 10px;
+      font-size: 14px;
+    }
+    
+    .pagination-container .text-muted {
+      text-align: center;
+      font-size: 13px;
+    }
+    
+    /* Hide page jump on very small screens */
+    .pagination-container form {
+      display: none;
+    }
+  }
   
   /* Empty state */
   .empty-state {
@@ -231,18 +332,41 @@ document.addEventListener('DOMContentLoaded', function() {
 
 <!-- School Years List -->
 <div class="card">
-    <div class="card-header">
-        <i class="bi bi-list-ul"></i> School Years List
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span>
+            <i class="bi bi-list-ul"></i> School Years List
+            <span class="badge bg-secondary ms-2" id="syCount"><?= number_format($total_sy) ?></span>
+        </span>
+        <div class="d-flex gap-2">
+            <select id="sortSY" class="form-select form-select-sm" style="width: auto;">
+                <option value="year-desc" <?= $sort === 'year-desc' ? 'selected' : '' ?>>Year (Newest First)</option>
+                <option value="year-asc" <?= $sort === 'year-asc' ? 'selected' : '' ?>>Year (Oldest First)</option>
+                <option value="status-active" <?= $sort === 'status-active' ? 'selected' : '' ?>>Active Status First</option>
+                <option value="status-inactive" <?= $sort === 'status-inactive' ? 'selected' : '' ?>>Inactive Status First</option>
+            </select>
+            <div style="position: relative; width: 250px;">
+                <i class="bi bi-search" style="position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: #6c757d; pointer-events: none;"></i>
+                <input type="text" class="form-control form-control-sm" id="sySearch" placeholder="Search by year..." value="<?= htmlspecialchars($search) ?>" style="padding-left: 35px; padding-right: 30px;">
+                <button type="button" id="clearSYSearch" class="btn btn-sm" style="position: absolute; right: 5px; top: 50%; transform: translateY(-50%); padding: 0; width: 20px; height: 20px; border: none; background: transparent; <?= empty($search) ? 'display: none;' : 'display: block;' ?>">
+                    <i class="bi bi-x-circle-fill" style="color: #6c757d;"></i>
+                </button>
+            </div>
+        </div>
     </div>
     <div class="card-body">
-        <?php if (empty($school_years)): ?>
+        <?php if (empty($school_years) && empty($search)): ?>
         <div class="text-center empty-state">
             <i class="bi bi-calendar-x" style="font-size: 3rem; color: #ccc;"></i>
             <p class="text-muted mt-3">No school years found. Create one to get started.</p>
         </div>
+        <?php elseif (empty($school_years)): ?>
+        <div class="text-center empty-state">
+            <i class="bi bi-search" style="font-size: 3rem; color: #ccc;"></i>
+            <p class="text-muted mt-3">No school years found matching your search.</p>
+        </div>
         <?php else: ?>
         <div class="table-responsive">
-            <table class="table table-hover" id="schoolYearsTable">
+            <table class="table table-hover mb-0" id="schoolYearsTable">
                 <thead>
                     <tr>
                         <th>School Year</th>
@@ -298,6 +422,93 @@ document.addEventListener('DOMContentLoaded', function() {
             </div>
             <?php endif; ?>
         </div>
+
+        <!-- Pagination -->
+        <?php if ($total_sy > 0): ?>
+        <div class="pagination-container">
+            <div class="d-flex justify-content-between align-items-center">
+                <div class="text-muted">
+                    Page <?= $page ?> of <?= max(1, $total_pages) ?>
+                </div>
+                
+                <nav aria-label="Page navigation">
+                    <ul class="pagination mb-0">
+                        <!-- First Page -->
+                        <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+                            <a class="page-link" href="?page=1&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>" title="First Page">
+                                <i class="bi bi-chevron-double-left"></i>
+                            </a>
+                        </li>
+                        
+                        <!-- Previous Page -->
+                        <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+                            <a class="page-link" href="?page=<?= max(1, $page - 1) ?>&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>">Previous</a>
+                        </li>
+                        
+                        <!-- Page Numbers -->
+                        <?php
+                        $start_page = max(1, $page - 2);
+                        $end_page = min(max(1, $total_pages), $start_page + 4);
+                        $start_page = max(1, $end_page - 4);
+                        
+                        for($i = $start_page; $i <= $end_page; $i++): 
+                        ?>
+                        <li class="page-item <?= $i == $page ? 'active' : '' ?>">
+                            <a class="page-link" href="?page=<?= $i ?>&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>"><?= $i ?></a>
+                        </li>
+                        <?php endfor; ?>
+                        
+                        <!-- Next Page -->
+                        <li class="page-item <?= $page >= $total_pages ? 'disabled' : '' ?>">
+                            <a class="page-link" href="?page=<?= min($total_pages, $page + 1) ?>&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>">Next</a>
+                        </li>
+                        
+                        <!-- Last Page -->
+                        <li class="page-item <?= $page >= $total_pages ? 'disabled' : '' ?>">
+                            <a class="page-link" href="?page=<?= max(1, $total_pages) ?>&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>" title="Last Page">
+                                <i class="bi bi-chevron-double-right"></i>
+                            </a>
+                        </li>
+                    </ul>
+                </nav>
+                
+                <!-- Custom Page Jump -->
+                <div class="d-flex align-items-center gap-2">
+                    <span class="text-muted small">Go to:</span>
+                    <form method="GET" class="d-flex gap-2" onsubmit="return validatePageJump()">
+                        <input type="hidden" name="search" value="<?= htmlspecialchars($search) ?>">
+                        <input type="hidden" name="sort" value="<?= htmlspecialchars($sort) ?>">
+                        <input type="number" 
+                               name="page" 
+                               id="pageJump"
+                               class="form-control form-control-sm" 
+                               style="width: 70px;" 
+                               min="1" 
+                               max="<?= max(1, $total_pages) ?>"
+                               placeholder="<?= $page ?>"
+                               title="Enter page number (1-<?= max(1, $total_pages) ?>)">
+                        <button type="submit" class="btn btn-sm btn-primary">
+                            <i class="bi bi-arrow-right"></i>
+                        </button>
+                    </form>
+                </div>
+            </div>
+            
+            <script>
+            function validatePageJump() {
+                const input = document.getElementById('pageJump');
+                const value = parseInt(input.value);
+                const max = parseInt(input.max);
+                
+                if (!value || value < 1 || value > max) {
+                    alert('Please enter a valid page number between 1 and ' + max);
+                    return false;
+                }
+                return true;
+            }
+            </script>
+        </div>
+        <?php endif; ?>
     </div>
 </div>
 
@@ -322,6 +533,41 @@ document.addEventListener('DOMContentLoaded', function() {
 </div>
 
 <script>
+// Search and Sort functionality
+(function() {
+    const searchInput = document.getElementById('sySearch');
+    const clearSearchBtn = document.getElementById('clearSYSearch');
+    const sortSelect = document.getElementById('sortSY');
+    
+    function updateTable() {
+        const q = searchInput ? searchInput.value.trim() : '';
+        const s = sortSelect ? sortSelect.value : 'year-desc';
+        window.location.href = `school_years.php?page=1&search=${encodeURIComponent(q)}&sort=${encodeURIComponent(s)}`;
+    }
+
+    if (searchInput) {
+        let searchTimeout;
+        searchInput.addEventListener('input', function() {
+            if (clearSearchBtn) clearSearchBtn.style.display = this.value ? 'block' : 'none';
+            
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(updateTable, 800);
+        });
+        
+        if (clearSearchBtn) {
+            clearSearchBtn.addEventListener('click', function() {
+                searchInput.value = '';
+                this.style.display = 'none';
+                updateTable();
+            });
+        }
+    }
+    
+    if (sortSelect) {
+        sortSelect.addEventListener('change', updateTable);
+    }
+})();
+
 // Delete school year function
 let deleteSchoolYearId = null;
 

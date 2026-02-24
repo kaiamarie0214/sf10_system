@@ -120,6 +120,8 @@ if (isset($_GET['delete_id'])) {
 $filter_grade = isset($_GET['filter_grade']) ? $_GET['filter_grade'] : 'all';
 $filter_status = isset($_GET['filter_status']) ? $_GET['filter_status'] : 'all';
 $filter_sy = isset($_GET['filter_sy']) ? $_GET['filter_sy'] : 'all';
+$search = isset($_GET['search']) ? $_GET['search'] : '';
+$sort = isset($_GET['sort']) ? $_GET['sort'] : 'grade-asc';
 
 // Build query
 $where = [];
@@ -132,14 +134,39 @@ if ($filter_status !== 'all') {
 if ($filter_sy !== 'all') {
     $where[] = "school_year = '$filter_sy'";
 }
+if (!empty($search)) {
+    $search_escaped = $conn->real_escape_string($search);
+    $where[] = "(grade_level LIKE '%$search_escaped%' OR section LIKE '%$search_escaped%')";
+}
 $where_sql = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
+
+// Sort logic
+$order_by = "c.grade_level, c.section";
+switch ($sort) {
+    case 'grade-asc': $order_by = "c.grade_level ASC, c.section ASC"; break;
+    case 'grade-desc': $order_by = "c.grade_level DESC, c.section ASC"; break;
+    case 'section-asc': $order_by = "c.section ASC, c.grade_level ASC"; break;
+    case 'section-desc': $order_by = "c.section DESC, c.grade_level ASC"; break;
+}
+
+// --- PAGINATION LOGIC ---
+$page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+$items_per_page = 20;
+
+// Get total count for pagination
+$count_query = "SELECT COUNT(*) as total FROM classes $where_sql";
+$total_classes_filtered = $conn->query($count_query)->fetch_assoc()['total'];
+$total_pages = ceil($total_classes_filtered / $items_per_page);
+$page = max(1, min($total_pages, $page));
+$offset = ($page - 1) * $items_per_page;
 
 // Get classes with student count
 $classes_query = "SELECT c.*, 
                   (SELECT COUNT(*) FROM students WHERE grade_level = c.grade_level AND section = c.section) as student_count
                   FROM classes c 
                   $where_sql
-                  ORDER BY c.grade_level, c.section";
+                  ORDER BY $order_by
+                  LIMIT $items_per_page OFFSET $offset";
 $classes = $conn->query($classes_query);
 
 // Get distinct school years for filter
@@ -219,7 +246,7 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 
 <!-- Classes List -->
-<div class="card">
+<div class="card classes-card">
     <div class="card-header d-flex justify-content-between align-items-center">
         <span>
             <i class="bi bi-list-ul"></i> All Classes 
@@ -227,15 +254,15 @@ document.addEventListener('DOMContentLoaded', function() {
         </span>
         <div class="d-flex gap-2">
             <select id="sortClasses" class="form-select form-select-sm" style="width: auto;">
-                        <option value="grade-asc">Grade Level (1-6)</option>
-                        <option value="grade-desc">Grade Level (6-1)</option>
-                        <option value="section-asc">Section (A-Z)</option>
-                        <option value="section-desc">Section (Z-A)</option>
+                        <option value="grade-asc" <?= $sort == 'grade-asc' ? 'selected' : '' ?>>Grade Level (1-6)</option>
+                        <option value="grade-desc" <?= $sort == 'grade-desc' ? 'selected' : '' ?>>Grade Level (6-1)</option>
+                        <option value="section-asc" <?= $sort == 'section-asc' ? 'selected' : '' ?>>Section (A-Z)</option>
+                        <option value="section-desc" <?= $sort == 'section-desc' ? 'selected' : '' ?>>Section (Z-A)</option>
                     </select>
                     <div style="position: relative; width: 250px;">
                         <i class="bi bi-search" style="position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: #6c757d; pointer-events: none;"></i>
-                        <input type="text" class="form-control form-control-sm" id="classSearch" placeholder="Search by grade or section..." style="padding-left: 35px; padding-right: 30px;">
-                        <button type="button" id="clearClassSearch" class="btn btn-sm" style="position: absolute; right: 5px; top: 50%; transform: translateY(-50%); padding: 0; width: 20px; height: 20px; border: none; background: transparent; display: none;">
+                        <input type="text" class="form-control form-control-sm" id="classSearch" placeholder="Search by grade or section..." value="<?= htmlspecialchars($search) ?>" style="padding-left: 35px; padding-right: 30px;">
+                        <button type="button" id="clearClassSearch" class="btn btn-sm" style="position: absolute; right: 5px; top: 50%; transform: translateY(-50%); padding: 0; width: 20px; height: 20px; border: none; background: transparent; <?= empty($search) ? 'display: none;' : 'display: block;' ?>">
                             <i class="bi bi-x-circle-fill" style="color: #6c757d;"></i>
                         </button>
                     </div>
@@ -289,32 +316,26 @@ document.addEventListener('DOMContentLoaded', function() {
 
             <style>
                 html, body {
-                    overflow: hidden !important;
                     height: 100vh;
                     margin: 0;
                     padding: 0;
+                    overflow: hidden !important;
                 }
                 body {
                     display: flex;
                     flex-direction: column;
                 }
-                #mainContent {
+                .main-wrapper {
+                    flex: 1 1 auto;
                     display: flex;
                     flex-direction: column;
-                    flex: 1 1 auto;
+                    min-height: 0;
                     overflow: hidden;
-                    padding-bottom: 0 !important;
                 }
                 footer {
                     flex-shrink: 0;
-                    position: sticky;
-                    bottom: 0;
-                    z-index: 100;
                 }
-                #mainContent > * {
-                    flex-shrink: 0;
-                }
-                #mainContent .card:last-of-type {
+                .classes-card {
                     flex: 1 1 auto;
                     display: flex;
                     flex-direction: column;
@@ -322,19 +343,20 @@ document.addEventListener('DOMContentLoaded', function() {
                     overflow: hidden;
                     margin-bottom: 0 !important;
                 }
-                .card-body {
+                .classes-card .card-body {
                     flex: 1 1 auto;
                     display: flex;
                     flex-direction: column;
                     min-height: 0;
                     overflow: hidden;
-                    padding-bottom: 1rem !important;
+                    padding: 0;
                 }
                 .table-responsive {
                     flex: 1 1 auto;
                     min-height: 0;
                     overflow-y: auto !important;
-                    overflow-x: hidden;
+                    overflow-x: auto;
+                    -webkit-overflow-scrolling: touch;
                     margin-bottom: 0;
                 }
                 #classesTable {
@@ -343,13 +365,67 @@ document.addEventListener('DOMContentLoaded', function() {
                     margin-bottom: 0;
                 }
                 #classesTable th, #classesTable td {
-                    padding: 6px 8px;
+                    padding: 8px;
                 }
                 #classesTable thead {
                     position: sticky;
                     top: 0;
                     z-index: 10;
                     background: var(--card-bg, #fff);
+                }
+
+                .pagination-container {
+                    flex-shrink: 0;
+                    position: sticky;
+                    bottom: 0;
+                    z-index: 1000;
+                    background: var(--card-bg);
+                    border-top: 2px solid var(--border-color);
+                    padding: 12px 15px;
+                    box-shadow: 0 -2px 8px rgba(0,0,0,0.1);
+                }
+
+                body.dark-theme .pagination-container {
+                    background: #242526;
+                    border-top-color: #3a3b3c;
+                    box-shadow: 0 -2px 8px rgba(0,0,0,0.3);
+                }
+
+                /* Mobile pagination adjustments */
+                @media (max-width: 768px) {
+                    .pagination-container {
+                        padding: 10px;
+                    }
+                    
+                    .pagination-container .d-flex {
+                        flex-direction: column;
+                        gap: 10px;
+                    }
+                    
+                    .pagination-container nav {
+                        width: 100%;
+                        overflow-x: auto;
+                    }
+                    
+                    .pagination-container .pagination {
+                        flex-wrap: nowrap;
+                        justify-content: center;
+                    }
+                    
+                    .pagination-container .page-item .page-link {
+                        padding: 6px 10px;
+                        font-size: 14px;
+                    }
+                    
+                    .pagination-container .text-muted {
+                        text-align: center;
+                        font-size: 13px;
+                    }
+                    
+                    /* Hide page jump on very small screens */
+                    .pagination-container form {
+                        display: none;
+                    }
                 }
 
                 /* Mobile responsive styles */
@@ -404,8 +480,8 @@ document.addEventListener('DOMContentLoaded', function() {
             </style>
             <div class="card-body">
                 <div class="table-responsive">
-                    <table class="table table-hover" id="classesTable">
-                        <thead style="position: sticky; top: 0; z-index: 10;">
+                    <table class="table table-hover mb-0" id="classesTable">
+                        <thead>
                             <tr>
                                 <th>Grade Level</th>
                                 <th>Section</th>
@@ -469,6 +545,99 @@ document.addEventListener('DOMContentLoaded', function() {
                     </table>
                 </div>
             </div>
+
+            <!-- Pagination -->
+            <?php if ($total_classes_filtered > 0): ?>
+            <div class="pagination-container">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div class="text-muted">
+                        Page <?= $page ?> of <?= max(1, $total_pages) ?>
+                    </div>
+                    
+                    <nav aria-label="Page navigation">
+                        <ul class="pagination mb-0">
+                            <!-- First Page -->
+                            <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+                                <a class="page-link" href="?page=1&filter_grade=<?= urlencode($filter_grade) ?>&filter_status=<?= urlencode($filter_status) ?>&filter_sy=<?= urlencode($filter_sy) ?>&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>" title="First Page">
+                                    <i class="bi bi-chevron-double-left"></i>
+                                </a>
+                            </li>
+                            
+                            <!-- Previous Page -->
+                            <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+                                <a class="page-link" href="?page=<?= max(1, $page - 1) ?>&filter_grade=<?= urlencode($filter_grade) ?>&filter_status=<?= urlencode($filter_status) ?>&filter_sy=<?= urlencode($filter_sy) ?>&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>">Previous</a>
+                            </li>
+                            
+                            <!-- Page Numbers -->
+                            <?php
+                            $start_page = max(1, $page - 2);
+                            $end_page = min(max(1, $total_pages), $start_page + 4);
+                            $start_page = max(1, $end_page - 4);
+                            
+                            for($i = $start_page; $i <= $end_page; $i++): 
+                            ?>
+                            <li class="page-item <?= $i == $page ? 'active' : '' ?>">
+                                <a class="page-link" href="?page=<?= $i ?>&filter_grade=<?= urlencode($filter_grade) ?>&filter_status=<?= urlencode($filter_status) ?>&filter_sy=<?= urlencode($filter_sy) ?>&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>"><?= $i ?></a>
+                            </li>
+                            <?php endfor; ?>
+                            
+                            <!-- Next Page -->
+                            <li class="page-item <?= $page >= $total_pages ? 'disabled' : '' ?>">
+                                <a class="page-link" href="?page=<?= min($total_pages, $page + 1) ?>&filter_grade=<?= urlencode($filter_grade) ?>&filter_status=<?= urlencode($filter_status) ?>&filter_sy=<?= urlencode($filter_sy) ?>&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>">Next</a>
+                            </li>
+                            
+                            <!-- Last Page -->
+                            <li class="page-item <?= $page >= $total_pages ? 'disabled' : '' ?>">
+                                <a class="page-link" href="?page=<?= max(1, $total_pages) ?>&filter_grade=<?= urlencode($filter_grade) ?>&filter_status=<?= urlencode($filter_status) ?>&filter_sy=<?= urlencode($filter_sy) ?>&search=<?= urlencode($search) ?>&sort=<?= urlencode($sort) ?>" title="Last Page">
+                                    <i class="bi bi-chevron-double-right"></i>
+                                </a>
+                            </li>
+                        </ul>
+                    </nav>
+                    
+                    <!-- Custom Page Jump -->
+                    <div class="d-flex align-items-center gap-2">
+                        <span class="text-muted small">Go to:</span>
+                        <form method="GET" class="d-flex gap-2" onsubmit="return validatePageJump()">
+                            <input type="hidden" name="filter_grade" value="<?= htmlspecialchars($filter_grade) ?>">
+                            <input type="hidden" name="filter_status" value="<?= htmlspecialchars($filter_status) ?>">
+                            <input type="hidden" name="filter_sy" value="<?= htmlspecialchars($filter_sy) ?>">
+                            <input type="hidden" name="search" value="<?= htmlspecialchars($search) ?>">
+                            <input type="hidden" name="sort" value="<?= htmlspecialchars($sort) ?>">
+                            <input type="number" 
+                                   name="page" 
+                                   id="pageJump"
+                                   class="form-control form-control-sm" 
+                                   style="width: 70px;" 
+                                   min="1" 
+                                   max="<?= max(1, $total_pages) ?>"
+                                   placeholder="<?= $page ?>"
+                                   title="Enter page number (1-<?= max(1, $total_pages) ?>)">
+                            <button type="submit" class="btn btn-sm btn-primary">
+                                <i class="bi bi-arrow-right"></i>
+                            </button>
+                        </form>
+                    </div>
+                </div>
+                
+                <script>
+                function validatePageJump() {
+                    const input = document.getElementById('pageJump');
+                    const value = parseInt(input.value);
+                    const max = parseInt(input.max);
+                    
+                    if (!value || value < 1 || value > max) {
+                        alert('Please enter a valid page number between 1 and ' + max);
+                        return false;
+                    }
+                    return true;
+                }
+                </script>
+            </div>
+            <?php endif; ?>
+        </div>
+    </div>
+</div>
         </div>
     </div>
 </div>
@@ -508,59 +677,45 @@ function confirmDelete(classId, className) {
     const searchInput = document.getElementById('classSearch');
     const clearSearchBtn = document.getElementById('clearClassSearch');
     const sortSelect = document.getElementById('sortClasses');
-    const tableBody = document.querySelector('#classesTable tbody');
-    const classRows = Array.from(tableBody.querySelectorAll('.class-row'));
     
-    if (searchInput && clearSearchBtn) {
-        // Show/hide clear button based on input value
+    function updateTable() {
+        const search = searchInput ? searchInput.value.trim() : '';
+        const sort = sortSelect ? sortSelect.value : 'grade-asc';
+        
+        // Preserve other filters
+        const urlParams = new URLSearchParams(window.location.search);
+        const filterGrade = urlParams.get('filter_grade') || 'all';
+        const filterStatus = urlParams.get('filter_status') || 'all';
+        const filterSy = urlParams.get('filter_sy') || 'all';
+        
+        window.location.href = `classes.php?page=1&filter_grade=${encodeURIComponent(filterGrade)}&filter_status=${encodeURIComponent(filterStatus)}&filter_sy=${encodeURIComponent(filterSy)}&search=${encodeURIComponent(search)}&sort=${encodeURIComponent(sort)}`;
+    }
+
+    if (searchInput) {
+        let searchTimeout;
         searchInput.addEventListener('input', function() {
-            const searchTerm = this.value.toLowerCase().trim();
-            clearSearchBtn.style.display = this.value ? 'block' : 'none';
+            if (clearSearchBtn) clearSearchBtn.style.display = this.value ? 'block' : 'none';
             
-            classRows.forEach(row => {
-                const grade = row.getAttribute('data-grade').toLowerCase();
-                const section = row.getAttribute('data-section').toLowerCase();
-                
-                const matches = grade.includes(searchTerm) || section.includes(searchTerm);
-                row.style.display = matches ? '' : 'none';
-            });
+            // Use debounce for search to avoid too many reloads
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(() => {
+                updateTable();
+            }, 800);
         });
         
         // Clear search
-        clearSearchBtn.addEventListener('click', function() {
-            searchInput.value = '';
-            this.style.display = 'none';
-            classRows.forEach(row => row.style.display = '');
-            searchInput.focus();
-        });
+        if (clearSearchBtn) {
+            clearSearchBtn.addEventListener('click', function() {
+                searchInput.value = '';
+                this.style.display = 'none';
+                updateTable();
+            });
+        }
     }
     
     // Sort functionality
     if (sortSelect) {
-        sortSelect.addEventListener('change', function() {
-            const sortValue = this.value;
-            
-            classRows.sort((a, b) => {
-                let aVal, bVal;
-                
-                if (sortValue.startsWith('grade-')) {
-                    aVal = parseInt(a.getAttribute('data-grade'));
-                    bVal = parseInt(b.getAttribute('data-grade'));
-                } else if (sortValue.startsWith('section-')) {
-                    aVal = a.getAttribute('data-section').toLowerCase();
-                    bVal = b.getAttribute('data-section').toLowerCase();
-                }
-                
-                if (sortValue.endsWith('-asc')) {
-                    return aVal > bVal ? 1 : -1;
-                } else {
-                    return aVal < bVal ? 1 : -1;
-                }
-            });
-            
-            // Re-append sorted rows
-            classRows.forEach(row => tableBody.appendChild(row));
-        });
+        sortSelect.addEventListener('change', updateTable);
     }
 })();
 </script>

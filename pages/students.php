@@ -544,35 +544,13 @@ if (isset($_SESSION['error_message'])) {
 // Get all students with their current grade/section from schools_attended
 // Order by: students without school records first (NEW), then by creation date
 $sort = $_GET['sort'] ?? '';
+$search = $_GET['search'] ?? '';
+$page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+$items_per_page = 20;
 $selected_school_year = $_SESSION['school_year'] ?? '';
 
 $order_clause = "has_record ASC, s.created_at DESC"; // default
-switch ($sort) {
-  case 'name-asc':
-    $order_clause = "s.last_name ASC, s.first_name ASC";
-    break;
-  case 'name-desc':
-    $order_clause = "s.last_name DESC, s.first_name DESC";
-    break;
-  case 'grade-asc':
-    $order_clause = "sa.grade_level ASC, sa.section ASC";
-    break;
-  case 'grade-desc':
-    $order_clause = "sa.grade_level DESC, sa.section DESC";
-    break;
-  case 'gender-male':
-    $order_clause = "(CASE WHEN s.gender = 'Male' THEN 0 WHEN s.gender = 'Female' THEN 1 ELSE 2 END), s.last_name ASC";
-    break;
-  case 'gender-female':
-    $order_clause = "(CASE WHEN s.gender = 'Female' THEN 0 WHEN s.gender = 'Male' THEN 1 ELSE 2 END), s.last_name ASC";
-    break;
-  case 'filter-male':
-  case 'filter-female':
-    // filtering handled client-side/JS, keep default ordering
-    $order_clause = "s.last_name ASC";
-    break;
-}
-
+// ... (rest of switch remains same until student fetching)
 $selected_school_year_escaped = $conn->real_escape_string($selected_school_year);
 
 // Always load all students first (same source as grade_entry), then attach preferred school record
@@ -628,6 +606,22 @@ if (!empty($students)) {
   unset($student_row);
 }
 
+// --- APPLY FILTERS IN PHP ---
+if (!empty($search)) {
+    $search_lower = strtolower(trim($search));
+    $students = array_filter($students, function($s) use ($search_lower) {
+        $fullName = strtolower($s['last_name'] . ', ' . $s['first_name'] . ' ' . ($s['middle_name'] ?? ''));
+        $lrn = strtolower($s['lrn'] ?? '');
+        return strpos($fullName, $search_lower) !== false || strpos($lrn, $search_lower) !== false;
+    });
+}
+
+if ($sort === 'filter-male') {
+    $students = array_filter($students, function($s) { return strtolower($s['gender'] ?? '') === 'male'; });
+} elseif ($sort === 'filter-female') {
+    $students = array_filter($students, function($s) { return strtolower($s['gender'] ?? '') === 'female'; });
+}
+
 // Keep server-side default ordering behavior using the same sort option
 if (!empty($students)) {
   usort($students, function($a, $b) use ($sort) {
@@ -661,6 +655,13 @@ if (!empty($students)) {
     }
   });
 }
+
+// --- PAGINATION ---
+$total_students = count($students);
+$total_pages = ceil($total_students / $items_per_page);
+$page = max(1, min($total_pages, $page));
+$offset = ($page - 1) * $items_per_page;
+$students_to_show = array_slice($students, $offset, $items_per_page);
 
 $is_admin = $user['role'] === 'admin';
 ?>
@@ -716,6 +717,26 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 
 <style>
+  html, body {
+    height: 100vh;
+    margin: 0;
+    padding: 0;
+    overflow: hidden !important;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+  }
+  .main-wrapper {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+  }
+  footer {
+    flex-shrink: 0;
+  }
   #studentsTable {
     font-size: 13px;
     width: 100%;
@@ -731,17 +752,33 @@ document.addEventListener('DOMContentLoaded', function() {
     z-index: 10;
     background: var(--card-bg, #fff);
   }
+  .students-card {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    margin-bottom: 0 !important;
+  }
+  .students-card .card-body {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    padding: 0;
+  }
   #studentsTableScroll {
-    max-height: calc(100vh - 280px);
-    min-height: 300px;
-    overflow-y: auto;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto !important;
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
   }
 </style>
 
 <!-- Students List -->
-<div class="card" style="border-radius: 0.375rem; margin-bottom: 1rem;">
+<div class="card students-card" style="border-radius: 0.375rem;">
   <div class="card-header d-flex justify-content-between align-items-center">
     <span>
       <i class="bi bi-people"></i> All Students
@@ -761,8 +798,8 @@ document.addEventListener('DOMContentLoaded', function() {
       </select>
       <div style="position: relative; width: 250px;">
         <i class="bi bi-search" style="position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: #6c757d; pointer-events: none;"></i>
-        <input type="text" class="form-control form-control-sm" id="studentSearch" placeholder="Search by name or LRN..." style="padding-left: 35px; padding-right: 30px;">
-        <button type="button" id="clearStudentSearch" class="btn btn-sm" style="position: absolute; right: 5px; top: 50%; transform: translateY(-50%); padding: 0; width: 20px; height: 20px; border: none; background: transparent; display: none;">
+        <input type="text" class="form-control form-control-sm" id="studentSearch" placeholder="Search by name or LRN..." value="<?= htmlspecialchars($search) ?>" style="padding-left: 35px; padding-right: 30px;">
+        <button type="button" id="clearStudentSearch" class="btn btn-sm" style="position: absolute; right: 5px; top: 50%; transform: translateY(-50%); padding: 0; width: 20px; height: 20px; border: none; background: transparent; <?= !empty($search) ? 'display: block;' : 'display: none;' ?>">
           <i class="bi bi-x-circle-fill" style="color: #6c757d;"></i>
         </button>
       </div>
@@ -782,7 +819,15 @@ document.addEventListener('DOMContentLoaded', function() {
           </tr>
         </thead>
         <tbody>
-          <?php foreach($students as $student): 
+          <?php if (empty($students_to_show)): ?>
+          <tr>
+            <td colspan="6" class="text-center py-4 text-muted">
+              <i class="bi bi-search" style="font-size: 2rem; opacity: 0.3;"></i>
+              <p class="mt-2 mb-0">No students found matching your criteria</p>
+            </td>
+          </tr>
+          <?php else: ?>
+          <?php foreach($students_to_show as $student): 
             $isNew = ($student['has_record'] == 0); // Student has no school records
           ?>
           <tr class="student-row" 
@@ -854,11 +899,170 @@ document.addEventListener('DOMContentLoaded', function() {
             </td>
           </tr>
           <?php endforeach; ?>
+          <?php endif; ?>
         </tbody>
       </table>
     </div>
   </div>
+  <!-- Pagination -->
+  <?php if ($total_pages > 1): ?>
+  <div class="pagination-container">
+    <div class="d-flex justify-content-between align-items-center">
+      <div class="text-muted">
+        Page <?= $page ?> of <?= $total_pages ?>
+      </div>
+      
+      <nav aria-label="Page navigation">
+        <ul class="pagination mb-0">
+          <!-- First Page -->
+          <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+            <a class="page-link" href="?page=1&sort=<?= urlencode($sort) ?>&search=<?= urlencode($search) ?>" title="First Page">
+              <i class="bi bi-chevron-double-left"></i>
+            </a>
+          </li>
+          
+          <!-- Previous Page -->
+          <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+            <a class="page-link" href="?page=<?= $page - 1 ?>&sort=<?= urlencode($sort) ?>&search=<?= urlencode($search) ?>">Previous</a>
+          </li>
+          
+          <!-- Page Numbers (limited to 5) -->
+          <?php
+          $start_page = max(1, $page - 2);
+          $end_page = min($total_pages, $start_page + 4);
+          $start_page = max(1, $end_page - 4);
+          
+          for($i = $start_page; $i <= $end_page; $i++): 
+          ?>
+          <li class="page-item <?= $i == $page ? 'active' : '' ?>">
+            <a class="page-link" href="?page=<?= $i ?>&sort=<?= urlencode($sort) ?>&search=<?= urlencode($search) ?>"><?= $i ?></a>
+          </li>
+          <?php endfor; ?>
+          
+          <!-- Next Page -->
+          <li class="page-item <?= $page >= $total_pages ? 'disabled' : '' ?>">
+            <a class="page-link" href="?page=<?= $page + 1 ?>&sort=<?= urlencode($sort) ?>&search=<?= urlencode($search) ?>">Next</a>
+          </li>
+          
+          <!-- Last Page -->
+          <li class="page-item <?= $page >= $total_pages ? 'disabled' : '' ?>">
+            <a class="page-link" href="?page=<?= $total_pages ?>&sort=<?= urlencode($sort) ?>&search=<?= urlencode($search) ?>" title="Last Page">
+              <i class="bi bi-chevron-double-right"></i>
+            </a>
+          </li>
+        </ul>
+      </nav>
+      
+      <!-- Custom Page Jump -->
+      <div class="d-flex align-items-center gap-2">
+        <span class="text-muted small">Go to:</span>
+        <form method="GET" class="d-flex gap-2" onsubmit="return validatePageJump()">
+          <input type="hidden" name="sort" value="<?= htmlspecialchars($sort) ?>">
+          <input type="hidden" name="search" value="<?= htmlspecialchars($search) ?>">
+          <input type="number" 
+                 name="page" 
+                 id="pageJump"
+                 class="form-control form-control-sm" 
+                 style="width: 70px;" 
+                 min="1" 
+                 max="<?= $total_pages ?>"
+                 placeholder="<?= $page ?>"
+                 title="Enter page number (1-<?= $total_pages ?>)">
+          <button type="submit" class="btn btn-sm btn-primary">
+            <i class="bi bi-arrow-right"></i>
+          </button>
+        </form>
+      </div>
+    </div>
+    
+    <script>
+    function validatePageJump() {
+        const input = document.getElementById('pageJump');
+        const value = parseInt(input.value);
+        const max = parseInt(input.max);
+        
+        if (!value || value < 1 || value > max) {
+            alert('Please enter a valid page number between 1 and ' + max);
+            return false;
+        }
+        return true;
+    }
+    </script>
+  </div>
+  <?php elseif ($total_students > 0): ?>
+  <div class="card-footer py-2">
+    <div class="text-muted" style="font-size: 0.85rem;">
+      Showing all <?= $total_students ?> students
+    </div>
+  </div>
+  <?php endif; ?>
 </div>
+
+<style>
+/* Style for pagination */
+.pagination-sm .page-link {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.875rem;
+}
+.card-footer {
+    background-color: var(--card-bg, #fff);
+    border-top: 1px solid rgba(0,0,0,0.125);
+}
+
+.pagination-container {
+    flex-shrink: 0;
+    position: sticky;
+    bottom: 0;
+    z-index: 1000;
+    background: var(--card-bg);
+    border-top: 2px solid var(--border-color);
+    padding: 12px 15px;
+    box-shadow: 0 -2px 8px rgba(0,0,0,0.1);
+}
+
+body.dark-theme .pagination-container {
+    background: #242526;
+    border-top-color: #3a3b3c;
+    box-shadow: 0 -2px 8px rgba(0,0,0,0.3);
+}
+
+/* Mobile pagination adjustments */
+@media (max-width: 768px) {
+    .pagination-container {
+        padding: 10px;
+    }
+    
+    .pagination-container .d-flex {
+        flex-direction: column;
+        gap: 10px;
+    }
+    
+    .pagination-container nav {
+        width: 100%;
+        overflow-x: auto;
+    }
+    
+    .pagination-container .pagination {
+        flex-wrap: nowrap;
+        justify-content: center;
+    }
+    
+    .pagination-container .page-item .page-link {
+        padding: 6px 10px;
+        font-size: 14px;
+    }
+    
+    .pagination-container .text-muted {
+        text-align: center;
+        font-size: 13px;
+    }
+    
+    /* Hide page jump on very small screens */
+    .pagination-container form {
+        display: none;
+    }
+}
+</style>
 
 <style>
 /* Style for dropdown form to look like dropdown item */
@@ -1021,144 +1225,59 @@ document.addEventListener('DOMContentLoaded', function() {
     const searchInput = document.getElementById('studentSearch');
     const clearSearchBtn = document.getElementById('clearStudentSearch');
     const sortSelect = document.getElementById('sortStudents');
-    const tableBody = document.querySelector('#studentsTable tbody');
-  const studentRows = Array.from(tableBody.querySelectorAll('.student-row'));
     const studentCount = document.getElementById('studentCount');
 
-  if (!tableBody || !studentCount) {
-    return;
-  }
+    if (studentCount) {
+        studentCount.textContent = '<?= $total_students ?>';
+        studentCount.className = '<?= $total_students > 0 ? "badge bg-primary ms-2" : "badge bg-secondary ms-2" ?>';
+    }
 
-  const initialRows = [...studentRows];
-    
-    // Function to update visible student count
-    function updateStudentCount(rowsForCount) {
-      const sourceRows = Array.isArray(rowsForCount) ? rowsForCount : initialRows;
-      const visibleRows = sourceRows.filter(row => row.style.display !== 'none');
-        const count = visibleRows.length;
-        
-        studentCount.textContent = count;
-        
-        if (count === 0) {
-            studentCount.className = 'badge bg-secondary ms-2';
-        } else {
-            studentCount.className = 'badge bg-primary ms-2';
+    function updateTable() {
+        const sort = sortSelect ? sortSelect.value : '';
+        const search = searchInput ? searchInput.value.trim() : '';
+        window.location.href = `students.php?page=1&sort=${encodeURIComponent(sort)}&search=${encodeURIComponent(search)}`;
+    }
+
+    // Search input functionality
+    if (searchInput) {
+        let searchTimeout;
+        searchInput.addEventListener('input', function() {
+            if (clearSearchBtn) clearSearchBtn.style.display = this.value ? 'block' : 'none';
+            
+            // Use debounce for search to avoid too many reloads
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(() => {
+                updateTable();
+            }, 800);
+        });
+
+        // Clear search input
+        if (clearSearchBtn) {
+            clearSearchBtn.addEventListener('click', function() {
+                searchInput.value = '';
+                this.style.display = 'none';
+                updateTable();
+            });
         }
     }
-    
-    function normalizeName(value) {
-      return (value || '').toLowerCase().trim();
+
+    // Sort select functionality
+    if (sortSelect) {
+        sortSelect.addEventListener('change', updateTable);
     }
 
-    function applyTableState() {
-      const sortType = sortSelect ? sortSelect.value : 'all';
-      const searchTerm = normalizeName(searchInput ? searchInput.value : '');
-      // In 'all' mode: no search filter, no gender filter — show everything
-      const effectiveSearchTerm = (sortType === 'all') ? '' : searchTerm;
-      const rows = [...initialRows];
-
-      // For 'all' mode: force-show every row first, then re-append in original order and return
-      if (sortType === 'all') {
-        initialRows.forEach(row => {
-          row.style.display = '';
-          tableBody.appendChild(row);
-        });
-        updateStudentCount(initialRows);
-        return;
-      }
-
-      // Always restore order first for deterministic rendering
-      if (sortType === 'name-asc') {
-        rows.sort((a, b) => a.getAttribute('data-name').localeCompare(b.getAttribute('data-name')));
-      } else if (sortType === 'name-desc') {
-        rows.sort((a, b) => b.getAttribute('data-name').localeCompare(a.getAttribute('data-name')));
-      } else if (sortType === 'grade-asc') {
-        rows.sort((a, b) => parseInt(a.getAttribute('data-grade') || '0', 10) - parseInt(b.getAttribute('data-grade') || '0', 10));
-      } else if (sortType === 'grade-desc') {
-        rows.sort((a, b) => parseInt(b.getAttribute('data-grade') || '0', 10) - parseInt(a.getAttribute('data-grade') || '0', 10));
-      } else if (sortType === 'gender-male') {
-        rows.sort((a, b) => {
-          const aGender = (a.getAttribute('data-gender') || '').toLowerCase();
-          const bGender = (b.getAttribute('data-gender') || '').toLowerCase();
-          if (aGender === 'male' && bGender !== 'male') return -1;
-          if (aGender !== 'male' && bGender === 'male') return 1;
-          return a.getAttribute('data-name').localeCompare(b.getAttribute('data-name'));
-        });
-      } else if (sortType === 'gender-female') {
-        rows.sort((a, b) => {
-          const aGender = (a.getAttribute('data-gender') || '').toLowerCase();
-          const bGender = (b.getAttribute('data-gender') || '').toLowerCase();
-          if (aGender === 'female' && bGender !== 'female') return -1;
-          if (aGender !== 'female' && bGender === 'female') return 1;
-          return a.getAttribute('data-name').localeCompare(b.getAttribute('data-name'));
-        });
-      }
-
-      rows.forEach(row => tableBody.appendChild(row));
-
-      rows.forEach(row => {
-        const rowGender = (row.getAttribute('data-gender') || '').toLowerCase();
-        const name = normalizeName(row.getAttribute('data-name'));
-        const lrn = normalizeName(row.getAttribute('data-lrn'));
-            const matchesSearch = !effectiveSearchTerm || name.includes(effectiveSearchTerm) || lrn.includes(effectiveSearchTerm);
-
-        let matchesFilter = true;
-        if (sortType === 'filter-male') {
-          matchesFilter = rowGender === 'male';
-        } else if (sortType === 'filter-female') {
-          matchesFilter = rowGender === 'female';
-        }
-
-        row.style.display = (matchesSearch && matchesFilter) ? '' : 'none';
-      });
-
-      updateStudentCount(rows);
-    }
-
-    // Initialize count + render on page load
-    applyTableState();
-    
+    // Click on row to open dropdown (keep existing functionality)
     document.addEventListener('click', function(e) {
         const row = e.target.closest('tr.student-row');
-        
-        // If clicked on a row but not on the dropdown itself
         if (row && !e.target.closest('.dropdown')) {
             const studentId = row.getAttribute('data-student-id');
             const dropdownBtn = document.getElementById('actionsDropdown' + studentId);
-            
             if (dropdownBtn) {
                 const dropdown = bootstrap.Dropdown.getOrCreateInstance(dropdownBtn);
                 dropdown.toggle();
             }
         }
     });
-    
-    // Search and Sort functionality
-    if (searchInput && clearSearchBtn) {
-        // Show/hide clear button based on input value
-        searchInput.addEventListener('input', function() {
-            clearSearchBtn.style.display = this.value ? 'block' : 'none';
-        applyTableState();
-        });
-        
-        // Clear search input when X button is clicked
-        clearSearchBtn.addEventListener('click', function() {
-            searchInput.value = '';
-            clearSearchBtn.style.display = 'none';
-        applyTableState();
-        });
-    }
-    
-    // Sort functionality
-    if (sortSelect) {
-        sortSelect.addEventListener('change', function() {
-        if (this.value === 'all' && searchInput && clearSearchBtn) {
-          searchInput.value = '';
-          clearSearchBtn.style.display = 'none';
-        }
-        applyTableState();
-        });
-    }
 })();
 </script>
 
