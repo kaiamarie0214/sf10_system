@@ -115,6 +115,130 @@ function getSubjectNameForStudent($conn, $subject_id, $student_id, $school_atten
     
     return 'Unknown Subject';
 }
+
+// Function to get adviser full name from system if available
+function getAdviserFullName($conn, $school_row) {
+    if (!$school_row) return '';
+    $adviser_name = $school_row['adviser_name'] ?? '';
+    
+    // 1. Try matching existing adviser_name to a user in the system to get their latest full name
+    if (!empty($adviser_name)) {
+        $stmt = $conn->prepare("SELECT full_name FROM users WHERE LOWER(full_name) = LOWER(?) LIMIT 1");
+        $stmt->bind_param("s", $adviser_name);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        if ($row = $res->fetch_assoc()) {
+            $stmt->close();
+            return $row['full_name'];
+        }
+        $stmt->close();
+    }
+    
+    // 2. If no name or no match, look up by assignment (for internal records with missing adviser_name)
+    $grade_label = $school_row['grade_level'] ?? '';
+    $section = $school_row['section'] ?? '';
+    $school_year_str = $school_row['school_year'] ?? '';
+    
+    if ($grade_label && $section && $school_year_str) {
+        // Extract numeric grade level
+        preg_match('/(\d+)/', $grade_label, $m);
+        $gl_num = isset($m[1]) ? intval($m[1]) : null;
+        
+        if ($gl_num) {
+            $stmt = $conn->prepare("SELECT u.full_name 
+                                   FROM teacher_assignments ta
+                                   JOIN users u ON ta.teacher_id = u.id
+                                   JOIN school_years sy ON ta.school_year_id = sy.id
+                                   WHERE ta.grade_level = ? 
+                                   AND ta.section = ? 
+                                   AND ta.assignment_type = 'adviser'
+                                   AND sy.year = ?
+                                   LIMIT 1");
+            $stmt->bind_param("iss", $gl_num, $section, $school_year_str);
+            $stmt->execute();
+            $res = $stmt->get_result();
+            if ($row = $res->fetch_assoc()) {
+                $stmt->close();
+                return $row['full_name'];
+            }
+            $stmt->close();
+        }
+    }
+    
+    return $adviser_name;
+}
+
+// Function to get school details with fallback to adviser's info
+function getSchoolInfo($conn, $school_row) {
+    $info = [
+        'school_name' => $school_row['school_name'] ?? '',
+        'school_id' => $school_row['school_id'] ?? '',
+        'district' => $school_row['district'] ?? '',
+        'division' => $school_row['division'] ?? '',
+        'region' => $school_row['region'] ?? ''
+    ];
+
+    // If any critical field is missing, try to fetch from the assigned adviser in the system
+    if (empty($info['school_name']) || empty($info['school_id']) || empty($info['district'])) {
+        $adviser_name = $school_row['adviser_name'] ?? '';
+        $user_match = null;
+
+        // 1. Try matching by name first
+        if (!empty($adviser_name)) {
+            $stmt = $conn->prepare("SELECT school_name, school_id, district, division, region FROM users WHERE LOWER(full_name) = LOWER(?) LIMIT 1");
+            $stmt->bind_param("s", $adviser_name);
+            $stmt->execute();
+            $user_match = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+        }
+
+        // 2. If no match by name, try matching by assignment (for internal records)
+        if (!$user_match) {
+            $grade_label = $school_row['grade_level'] ?? '';
+            $section = $school_row['section'] ?? '';
+            $school_year_str = $school_row['school_year'] ?? '';
+            
+            if ($grade_label && $section && $school_year_str) {
+                preg_match('/(\d+)/', $grade_label, $m);
+                $gl_num = isset($m[1]) ? intval($m[1]) : null;
+
+                if ($gl_num) {
+                    $stmt = $conn->prepare("SELECT u.school_name, u.school_id, u.district, u.division, u.region 
+                                           FROM teacher_assignments ta
+                                           JOIN users u ON ta.teacher_id = u.id
+                                           JOIN school_years sy ON ta.school_year_id = sy.id
+                                           WHERE ta.grade_level = ? 
+                                           AND ta.section = ? 
+                                           AND ta.assignment_type = 'adviser'
+                                           AND sy.year = ?
+                                           LIMIT 1");
+                    $stmt->bind_param("iss", $gl_num, $section, $school_year_str);
+                    $stmt->execute();
+                    $user_match = $stmt->get_result()->fetch_assoc();
+                    $stmt->close();
+                }
+            }
+        }
+
+        // 3. Last fallback: try any admin user's school info as a global default
+        if (!$user_match) {
+            $admin_query = $conn->query("SELECT school_name, school_id, district, division, region FROM users WHERE role = 'admin' AND school_name IS NOT NULL AND school_name != '' LIMIT 1");
+            if ($admin_query && $admin_query->num_rows > 0) {
+                $user_match = $admin_query->fetch_assoc();
+            }
+        }
+
+        if ($user_match) {
+            if (empty($info['school_name'])) $info['school_name'] = $user_match['school_name'] ?? '';
+            if (empty($info['school_id'])) $info['school_id'] = $user_match['school_id'] ?? '';
+            if (empty($info['district'])) $info['district'] = $user_match['district'] ?? '';
+            if (empty($info['division'])) $info['division'] = $user_match['division'] ?? '';
+            if (empty($info['region'])) $info['region'] = $user_match['region'] ?? '';
+        }
+    }
+
+    return $info;
+}
 }
 ?>
 
@@ -480,7 +604,7 @@ else
    </div>
    <div style="background: #fff3cd; border: 1px solid #ffeeba; color: #856404; padding: 10px 15px; border-radius: 6px; font-size: 14px; display: flex; align-items: center; gap: 10px;">
       <i class="bi bi-exclamation-triangle-fill"></i>
-      <span><strong>Reminder:</strong> For a perfect fit, set <strong>Paper Size</strong> to <strong>Legal (8.5" x 13")</strong> and <strong>Margins</strong> to <strong>None</strong> in the print settings.</span>
+      <span><strong>Reminder:</strong> For a perfect fit, set <strong>Paper Size</strong> to <strong>Legal Size (8.5" x 14")</strong> and <strong>Margins</strong> to <strong>None</strong> in the print settings.</span>
    </div>
 </div>
 
@@ -1492,11 +1616,13 @@ else
  </tr>
  <tr height=27 style='mso-height-source:userset;height:20.25pt'>
   <td height=27 class=xl66 style='height:20.25pt'></td>
+  <?php $grade1_info = getSchoolInfo($conn, $grade1_school); ?>
+  <?php $grade2_info = getSchoolInfo($conn, $grade2_school); ?>
   <td colspan=2 class=xl235>School:</td>
      <td colspan=11 class=xl154>
          <?php
-            if (isset($grade1_school) && !empty($grade1_school['school_name'])) {
-               echo '<strong>' . strtoupper(htmlspecialchars($grade1_school['school_name'])) . '</strong>';
+            if (!empty($grade1_info['school_name'])) {
+               echo '<strong>' . strtoupper(htmlspecialchars($grade1_info['school_name'])) . '</strong>';
             } else {
                echo '&nbsp;';
             }
@@ -1504,8 +1630,8 @@ else
       </td>
    <td colspan=4 class=xl201>School ID:</td>
    <td colspan=2 class=xl154 style='border-right:1.0pt solid black'> <?php
-         if (isset($grade1_school) && !empty($grade1_school['school_id'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade1_school['school_id'])) . '</strong>';
+         if (!empty($grade1_info['school_id'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade1_info['school_id'])) . '</strong>';
          } else {
             echo '&nbsp;';
          }
@@ -1515,8 +1641,8 @@ else
   <td class=xl89 colspan=2>School:</td>
    <td colspan=20 class=xl154> 
    <?php
-         if (isset($grade2_school) && !empty($grade2_school['school_name'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade2_school['school_name'])) . '</strong>';
+         if (!empty($grade2_info['school_name'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade2_info['school_name'])) . '</strong>';
          } else {
             echo '&nbsp;';
          }
@@ -1524,8 +1650,8 @@ else
       </td>
   <td colspan=5 class=xl155>School ID:</td>
   <td colspan=2 class=xl154 style='border-right:1.0pt solid black'> <?php
-         if (isset($grade2_school) && !empty($grade2_school['school_id'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade2_school['school_id'])) . '</strong>';
+         if (!empty($grade2_info['school_id'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade2_info['school_id'])) . '</strong>';
          } else {
             echo '&nbsp;';
          }
@@ -1540,8 +1666,8 @@ else
    <td class=xl91 colspan=2 style='mso-ignore:colspan'>District:</td>
    <td colspan=3 class=xl123>
       <?php
-         if (isset($grade1_school) && !empty($grade1_school['district'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade1_school['district'])) . '</strong>';
+         if (!empty($grade1_info['district'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade1_info['district'])) . '</strong>';
          } else {
             echo '&nbsp;';
          }
@@ -1549,8 +1675,8 @@ else
    </td>
   <td class=xl66 colspan=2 style='mso-ignore:colspan'>Division:</td>
   <td colspan=9 class=xl94><?php
-         if (isset($grade1_school) && !empty($grade1_school['division'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade1_school['division'])) . '</strong>';
+         if (!empty($grade1_info['division'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade1_info['division'])) . '</strong>';
          } else {
             echo '&nbsp;';
          }
@@ -1558,8 +1684,8 @@ else
       </td>
   <td colspan=2 class=xl76>Region:</td>
   <td class=xl92><?php
-         if (isset($grade1_school) && !empty($grade1_school['region'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade1_school['region'])) . '</strong>';
+         if (!empty($grade1_info['region'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade1_info['region'])) . '</strong>';
          } else {
             echo '&nbsp;';
          }
@@ -1568,8 +1694,8 @@ else
    <td class=xl91 colspan=2 style='mso-ignore:colspan'>District:</td>
    <td colspan=3 class=xl123>
       <?php
-         if (isset($grade2_school) && !empty($grade2_school['district'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade2_school['district'])) . '</strong>';
+         if (!empty($grade2_info['district'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade2_info['district'])) . '</strong>';
          } else {
             echo '&nbsp;';
          }
@@ -1577,8 +1703,8 @@ else
    </td>
   <td class=xl66 colspan=3 style='mso-ignore:colspan'>Division:</td>
   <td colspan=17 class=xl94><?php
-         if (isset($grade2_school) && !empty($grade2_school['division'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade2_school['division'])) . '</strong>';
+         if (!empty($grade2_info['division'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade2_info['division'])) . '</strong>';
          } else {
             echo '&nbsp;';
          }
@@ -1586,8 +1712,8 @@ else
       </td>
   <td colspan=3 class=xl76>Region:</td>
   <td class=xl93 style='border-top:none'><?php
-         if (isset($grade2_school) && !empty($grade2_school['region'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade2_school['region'])) . '</strong>';
+         if (!empty($grade2_info['region'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade2_info['region'])) . '</strong>';
          } else {
             echo '&nbsp;';
          }
@@ -1658,8 +1784,9 @@ else
   <td height=26 class=xl66 style='height:19.5pt'></td>
   <td colspan=6 class=xl96>Name of Adviser/Teacher:</td>
   <td colspan=7 class=xl94><?php
-         if (isset($grade1_school) && !empty($grade1_school['adviser_name'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade1_school['adviser_name'])) . '</strong>';
+         $adv_full = getAdviserFullName($conn, $grade1_school);
+         if (!empty($adv_full)) {
+            echo '<strong>' . strtoupper(htmlspecialchars($adv_full)) . '</strong>';
          } else {
             echo '&nbsp;';
          }
@@ -1671,8 +1798,9 @@ else
   <td class=xl75></td>
   <td class=xl75></td>
   <td colspan=13 class=xl94><?php
-         if (isset($grade2_school) && !empty($grade2_school['adviser_name'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade2_school['adviser_name'])) . '</strong>';
+         $adv_full2 = getAdviserFullName($conn, $grade2_school);
+         if (!empty($adv_full2)) {
+            echo '<strong>' . strtoupper(htmlspecialchars($adv_full2)) . '</strong>';
          } else {
             echo '&nbsp;';
          }
@@ -2764,18 +2892,20 @@ $ga4_final = (!empty($ga4_finals)) ? round(array_sum($ga4_finals)/count($ga4_fin
  </tr>
  <tr height=27 style='mso-height-source:userset;height:20.25pt'>
   <td height=27 class=xl66 style='height:20.25pt'></td>
+  <?php $grade3_info = getSchoolInfo($conn, $grade3_school); ?>
+  <?php $grade4_info = getSchoolInfo($conn, $grade4_school); ?>
   <td colspan=2 class=xl235>School:</td>
   <td colspan=11 class=xl154><?php
-            if (isset($grade3_school) && !empty($grade3_school['school_name'])) {
-               echo '<strong>' . strtoupper(htmlspecialchars($grade3_school['school_name'])) . '</strong>';
+            if (!empty($grade3_info['school_name'])) {
+               echo '<strong>' . strtoupper(htmlspecialchars($grade3_info['school_name'])) . '</strong>';
             } else {
                echo '&nbsp;';
             }
          ?></td>
   <td colspan=4 class=xl201>School ID:</td>
   <td colspan=2 class=xl154 style='border-right:1.0pt solid black'> <?php
-         if (isset($grade3_school) && !empty($grade3_school['school_id'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade3_school['school_id'])) . '</strong>';
+         if (!empty($grade3_info['school_id'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade3_info['school_id'])) . '</strong>';
          } else {
             echo '&nbsp;';
          }
@@ -2783,16 +2913,16 @@ $ga4_final = (!empty($ga4_finals)) ? round(array_sum($ga4_finals)/count($ga4_fin
   <td class=xl66></td>
   <td class=xl89 colspan=2 style='mso-ignore:colspan'>School:</td>
   <td colspan=20 class=xl154><?php
-            if (isset($grade4_school) && !empty($grade4_school['school_name'])) {
-               echo '<strong>' . strtoupper(htmlspecialchars($grade4_school['school_name'])) . '</strong>';
+            if (!empty($grade4_info['school_name'])) {
+               echo '<strong>' . strtoupper(htmlspecialchars($grade4_info['school_name'])) . '</strong>';
             } else {
                echo '&nbsp;';
             }
          ?></td>
   <td colspan=5 class=xl155>School ID:</td>
   <td colspan=2 class=xl154 style='border-right:1.0pt solid black'> <?php
-         if (isset($grade4_school) && !empty($grade4_school['school_id'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade4_school['school_id'])) . '</strong>';
+         if (!empty($grade4_info['school_id'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade4_info['school_id'])) . '</strong>';
          } else {
             echo '&nbsp;';
          }
@@ -2805,24 +2935,24 @@ $ga4_final = (!empty($ga4_finals)) ? round(array_sum($ga4_finals)/count($ga4_fin
   <td height=27 class=xl66 style='height:20.25pt'></td>
   <td class=xl91 colspan=2 style='mso-ignore:colspan'>District:</td>
   <td colspan=3 class=xl123><?php
-         if (isset($grade3_school) && !empty($grade3_school['district'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade3_school['district'])) . '</strong>';
+         if (!empty($grade3_info['district'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade3_info['district'])) . '</strong>';
          } else {
             echo '&nbsp;';
          }
       ?></td>
   <td class=xl66 colspan=2 style='mso-ignore:colspan'>Division:</td>
   <td colspan=9 class=xl94><?php
-         if (isset($grade3_school) && !empty($grade3_school['division'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade3_school['division'])) . '</strong>';
+         if (!empty($grade3_info['division'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade3_info['division'])) . '</strong>';
          } else {
             echo '&nbsp;';
          }
       ?></td>
   <td colspan=2 class=xl76>Region:</td>
   <td class=xl92><?php
-         if (isset($grade3_school) && !empty($grade3_school['region'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade3_school['region'])) . '</strong>';
+         if (!empty($grade3_info['region'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade3_info['region'])) . '</strong>';
          } else {
             echo '&nbsp;';
          }
@@ -2830,24 +2960,24 @@ $ga4_final = (!empty($ga4_finals)) ? round(array_sum($ga4_finals)/count($ga4_fin
   <td class=xl66></td>
   <td class=xl91 colspan=2 style='mso-ignore:colspan'>District:</td>
   <td colspan=3 class=xl123><?php
-         if (isset($grade4_school) && !empty($grade4_school['district'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade4_school['district'])) . '</strong>';
+         if (!empty($grade4_info['district'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade4_info['district'])) . '</strong>';
          } else {
             echo '&nbsp;';
          }
       ?></td>
   <td class=xl66 colspan=3 style='mso-ignore:colspan'>Division:</td>
   <td colspan=17 class=xl94><?php
-         if (isset($grade4_school) && !empty($grade4_school['division'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade4_school['division'])) . '</strong>';
+         if (!empty($grade4_info['division'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade4_info['division'])) . '</strong>';
          } else {
             echo '&nbsp;';
          }
       ?></td>
   <td colspan=3 class=xl76>Region:</td>
   <td class=xl93 style='border-top:none'><?php
-         if (isset($grade4_school) && !empty($grade4_school['region'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade4_school['region'])) . '</strong>';
+         if (!empty($grade4_info['region'])) {
+            echo '<strong>' . strtoupper(htmlspecialchars($grade4_info['region'])) . '</strong>';
          } else {
             echo '&nbsp;';
          }
@@ -2918,8 +3048,9 @@ $ga4_final = (!empty($ga4_finals)) ? round(array_sum($ga4_finals)/count($ga4_fin
   <td height=27 class=xl66 style='height:20.25pt'></td>
   <td colspan=6 class=xl96>Name of Adviser/Teacher:</td>
   <td colspan=7 class=xl94><?php
-         if (isset($grade3_school) && !empty($grade3_school['adviser_name'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade3_school['adviser_name'])) . '</strong>';
+         $adv_full3 = getAdviserFullName($conn, $grade3_school);
+         if (!empty($adv_full3)) {
+            echo '<strong>' . strtoupper(htmlspecialchars($adv_full3)) . '</strong>';
          } else {
             echo '&nbsp;';
          }
@@ -2931,8 +3062,9 @@ $ga4_final = (!empty($ga4_finals)) ? round(array_sum($ga4_finals)/count($ga4_fin
   <td class=xl75></td>
   <td class=xl75></td>
   <td colspan=13 class=xl94><?php
-         if (isset($grade4_school) && !empty($grade4_school['adviser_name'])) {
-            echo '<strong>' . strtoupper(htmlspecialchars($grade4_school['adviser_name'])) . '</strong>';
+         $adv_full4 = getAdviserFullName($conn, $grade4_school);
+         if (!empty($adv_full4)) {
+            echo '<strong>' . strtoupper(htmlspecialchars($adv_full4)) . '</strong>';
          } else {
             echo '&nbsp;';
          }

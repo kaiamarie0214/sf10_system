@@ -103,63 +103,10 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'get_grades') {
         }
       }
 
-      // Load remedial classes (scoped precisely to avoid cross-grade bleeding)
-      $remedial = [];
-      $remedial_table_exists = $conn->query("SHOW TABLES LIKE 'remedial_classes'");
-      if ($remedial_table_exists && $remedial_table_exists->num_rows > 0) {
-        $col_check = $conn->query("SHOW COLUMNS FROM remedial_classes LIKE 'school_attended_id'");
-        $has_school_attended = ($col_check && $col_check->num_rows > 0);
-        $col_check_gl = $conn->query("SHOW COLUMNS FROM remedial_classes LIKE 'grade_level'");
-        $has_grade_level_col = ($col_check_gl && $col_check_gl->num_rows > 0);
-
-        if ($has_school_attended) {
-          // Most precise: scoped to exact school_attended record
-          $remedial_query = $conn->prepare("SELECT learning_area, final_rating, remedial_class_mark,
-                                                   recomputed_final_grade, remarks, conducted_from, conducted_to
-                                            FROM remedial_classes
-                                            WHERE student_id = ? AND school_attended_id = ?
-                                            ORDER BY id LIMIT 2");
-          $remedial_query->bind_param("ii", $student_id, $school_attended_id);
-        } else {
-          // Fetch school_year AND grade_level from this school record
-          $school_info_stmt = $conn->prepare("SELECT school_year, grade_level FROM schools_attended WHERE id = ? LIMIT 1");
-          $school_info_stmt->bind_param("i", $school_attended_id);
-          $school_info_stmt->execute();
-          $school_info_row = $school_info_stmt->get_result()->fetch_assoc();
-          $sy_for_load   = $school_info_row['school_year'] ?? '';
-          $gl_for_load   = $school_info_row['grade_level'] ?? '';
-
-          if ($has_grade_level_col && $gl_for_load !== '') {
-            // Scope by both school_year AND grade_level — prevents cross-grade bleeding
-            $remedial_query = $conn->prepare("SELECT learning_area, final_rating, remedial_class_mark,
-                                                     recomputed_final_grade, remarks, conducted_from, conducted_to
-                                              FROM remedial_classes
-                                              WHERE student_id = ? AND school_year = ? AND grade_level = ?
-                                              ORDER BY id LIMIT 2");
-            $remedial_query->bind_param("iss", $student_id, $sy_for_load, $gl_for_load);
-          } else {
-            // Legacy fallback — only school_year (old records without grade_level)
-            $remedial_query = $conn->prepare("SELECT learning_area, final_rating, remedial_class_mark,
-                                                     recomputed_final_grade, remarks, conducted_from, conducted_to
-                                              FROM remedial_classes
-                                              WHERE student_id = ? AND school_year = ?
-                                              ORDER BY id LIMIT 2");
-            $remedial_query->bind_param("is", $student_id, $sy_for_load);
-          }
-        }
-
-        $remedial_query->execute();
-        $remedial_result = $remedial_query->get_result();
-        while ($r = $remedial_result->fetch_assoc()) {
-          $remedial[] = $r;
-        }
-      }
-        
         echo json_encode([
             'success' => true, 
             'grades' => $grades,
-            'is_transfer' => $is_transfer,
-            'remedial' => $remedial
+            'is_transfer' => $is_transfer
         ]);
     } catch (Exception $e) {
         echo json_encode(['success' => false, 'message' => 'Error loading grades: ' . $e->getMessage()]);
@@ -261,108 +208,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['grades'])) {
                 }
             }
         }
-
-            // Save remedial classes
-            if (isset($_POST['remedial']) && is_array($_POST['remedial'])) {
-              $remedial_table_exists = $conn->query("SHOW TABLES LIKE 'remedial_classes'");
-              if ($remedial_table_exists && $remedial_table_exists->num_rows > 0) {
-                $col_check = $conn->query("SHOW COLUMNS FROM remedial_classes LIKE 'school_attended_id'");
-                $has_school_attended = ($col_check && $col_check->num_rows > 0);
-                $col_check_gl = $conn->query("SHOW COLUMNS FROM remedial_classes LIKE 'grade_level'");
-                $has_grade_level_col = ($col_check_gl && $col_check_gl->num_rows > 0);
-
-                // Delete existing remedial classes for this specific grade scope only
-                if ($has_school_attended) {
-                  $delete_remedial = $conn->prepare("DELETE FROM remedial_classes WHERE student_id = ? AND school_attended_id = ?");
-                  $delete_remedial->bind_param("ii", $student_id, $school_attended_id);
-                } elseif ($has_grade_level_col && $grade_level_for_remedial) {
-                  // Scope delete by grade_level so we don't wipe remedial from other grades
-                  $delete_remedial = $conn->prepare("DELETE FROM remedial_classes WHERE student_id = ? AND school_year = ? AND grade_level = ?");
-                  $delete_remedial->bind_param("iss", $student_id, $school_year, $grade_level_for_remedial);
-                } else {
-                  $delete_remedial = $conn->prepare("DELETE FROM remedial_classes WHERE student_id = ? AND school_year = ?");
-                  $delete_remedial->bind_param("is", $student_id, $school_year);
-                }
-                $delete_remedial->execute();
-
-                foreach ($_POST['remedial'] as $remedial_data) {
-                  if (!empty($remedial_data['learning_area'])) {
-                    $learning_area = trim($remedial_data['learning_area']);
-                    $r_final_rating = !empty($remedial_data['final_rating']) ? round(floatval($remedial_data['final_rating'])) : null;
-                    $remedial_mark = !empty($remedial_data['remedial_class_mark']) ? round(floatval($remedial_data['remedial_class_mark'])) : null;
-                    if ($r_final_rating !== null) $r_final_rating = max(0, min(100, $r_final_rating));
-                    if ($remedial_mark !== null) $remedial_mark = max(0, min(100, $remedial_mark));
-
-                    // Auto-calculate recomputed grade and remarks from final + remedial marks
-                    $recomputed = null;
-                    $r_remarks = null;
-                    if ($r_final_rating !== null && $remedial_mark !== null) {
-                      $recomputed = round(($r_final_rating + $remedial_mark) / 2);
-                      $r_remarks = $recomputed >= 75 ? 'Passed' : 'Failed';
-                    }
-                    $conducted_from = !empty($remedial_data['conducted_from']) ? $remedial_data['conducted_from'] : null;
-                    $conducted_to = !empty($remedial_data['conducted_to']) ? $remedial_data['conducted_to'] : null;
-
-                    if ($has_school_attended) {
-                      $insert_remedial = $conn->prepare("INSERT INTO remedial_classes
-                        (student_id, school_attended_id, school_year, grade_level, learning_area, final_rating, remedial_class_mark,
-                         recomputed_final_grade, remarks, conducted_from, conducted_to)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                      $insert_remedial->bind_param(
-                        "iisssiiisss",
-                        $student_id,
-                        $school_attended_id,
-                        $school_year,
-                        $grade_level_for_remedial,
-                        $learning_area,
-                        $r_final_rating,
-                        $remedial_mark,
-                        $recomputed,
-                        $r_remarks,
-                        $conducted_from,
-                        $conducted_to
-                      );
-                    } elseif ($has_grade_level_col) {
-                      $insert_remedial = $conn->prepare("INSERT INTO remedial_classes
-                        (student_id, school_year, grade_level, learning_area, final_rating, remedial_class_mark,
-                         recomputed_final_grade, remarks, conducted_from, conducted_to)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                      $insert_remedial->bind_param(
-                        "isssiiisss",
-                        $student_id,
-                        $school_year,
-                        $grade_level_for_remedial,
-                        $learning_area,
-                        $r_final_rating,
-                        $remedial_mark,
-                        $recomputed,
-                        $r_remarks,
-                        $conducted_from,
-                        $conducted_to
-                      );
-                    } else {
-                      $insert_remedial = $conn->prepare("INSERT INTO remedial_classes
-                        (student_id, school_year, learning_area, final_rating, remedial_class_mark,
-                         recomputed_final_grade, remarks, conducted_from, conducted_to)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                      $insert_remedial->bind_param(
-                        "issiiisss",
-                        $student_id,
-                        $school_year,
-                        $learning_area,
-                        $r_final_rating,
-                        $remedial_mark,
-                        $recomputed,
-                        $r_remarks,
-                        $conducted_from,
-                        $conducted_to
-                      );
-                    }
-                    $insert_remedial->execute();
-                  }
-                }
-              }
-            }
         
         $_SESSION['success_message'] = "Grades saved successfully!";
         header("Location: enter_grades.php?student_id=$student_id&school_attended_id=$school_attended_id&student_name=" . urlencode($_POST['student_name'] ?? ''));
@@ -972,59 +817,6 @@ function renderGradesTable(grades, schoolAttendedId, isTransfer = false, selecte
           </tbody>
         </table>
       </div>
-
-      <div class="mt-4">
-        <h6 class="mb-2">Remedial Classes</h6>
-        <div class="table-responsive">
-          <table class="table table-bordered grades-table">
-            <thead>
-              <tr>
-                <th>Learning Area</th>
-                <th>Final Rating</th>
-                <th>Remedial Class Mark</th>
-                <th>Recomputed Final Grade</th>
-                <th>Remarks</th>
-                <th>Conducted From</th>
-                <th>Conducted To</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>
-                  <select name="remedial[1][learning_area]" class="form-select remedial-subject-select" id="remedial-subject-1" onchange="autoFillRemedialFinalRating(1)">
-                    <option value="">-- Select Subject --</option>
-                  </select>
-                </td>
-                <td><input type="number" name="remedial[1][final_rating]" class="form-control" min="0" max="100" step="0.01" readonly></td>
-                <td><input type="number" name="remedial[1][remedial_class_mark]" class="form-control" min="0" max="100" step="0.01" oninput="sanitizeGradeInput(this); calculateRecomputedGrade(1)"></td>
-                <td><input type="number" name="remedial[1][recomputed_final_grade]" class="form-control" readonly></td>
-                <td><input type="text" name="remedial[1][remarks]" class="form-control" readonly></td>
-                <td><input type="date" name="remedial[1][conducted_from]" class="form-control"></td>
-                <td><input type="date" name="remedial[1][conducted_to]" class="form-control"></td>
-              </tr>
-              <tr>
-                <td>
-                  <select name="remedial[2][learning_area]" class="form-select remedial-subject-select" id="remedial-subject-2" onchange="autoFillRemedialFinalRating(2)">
-                    <option value="">-- Select Subject --</option>
-                  </select>
-                </td>
-                <td><input type="number" name="remedial[2][final_rating]" class="form-control" min="0" max="100" step="0.01" readonly></td>
-                <td><input type="number" name="remedial[2][remedial_class_mark]" class="form-control" min="0" max="100" step="0.01" oninput="sanitizeGradeInput(this); calculateRecomputedGrade(2)"></td>
-                <td><input type="number" name="remedial[2][recomputed_final_grade]" class="form-control" readonly></td>
-                <td><input type="text" name="remedial[2][remarks]" class="form-control" readonly></td>
-                <td>
-                  <input type="hidden" name="remedial[2][conducted_from]" value="">
-                  <span class="text-muted">(same as row 1)</span>
-                </td>
-                <td>
-                  <input type="hidden" name="remedial[2][conducted_to]" value="">
-                  <span class="text-muted">(same as row 1)</span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
       
       <div class="d-flex justify-content-end gap-2 mt-3">
         <button type="button" class="btn btn-secondary" onclick="loadGrades()">
@@ -1039,48 +831,6 @@ function renderGradesTable(grades, schoolAttendedId, isTransfer = false, selecte
   
   container.innerHTML = html;
 
-  // Populate remedial dropdown from currently displayed subject names
-  populateRemedialSubjects();
-
-  // Restore remedial values from database
-  if (Array.isArray(remedial)) {
-    remedial.slice(0, 2).forEach((row, idx) => {
-      const n = idx + 1;
-      const learning = document.querySelector(`[name="remedial[${n}][learning_area]"]`);
-      const finalRating = document.querySelector(`[name="remedial[${n}][final_rating]"]`);
-      const mark = document.querySelector(`[name="remedial[${n}][remedial_class_mark]"]`);
-      const recomputed = document.querySelector(`[name="remedial[${n}][recomputed_final_grade]"]`);
-      const remarks = document.querySelector(`[name="remedial[${n}][remarks]"]`);
-      const from = document.querySelector(`[name="remedial[${n}][conducted_from]"]`);
-      const to = document.querySelector(`[name="remedial[${n}][conducted_to]"]`);
-
-      if (learning) learning.value = row.learning_area || '';
-      if (finalRating) finalRating.value = row.final_rating || '';
-      if (mark) mark.value = row.remedial_class_mark || '';
-      if (recomputed) recomputed.value = row.recomputed_final_grade || '';
-      if (remarks) remarks.value = row.remarks || '';
-      if (from) from.value = row.conducted_from || '';
-      if (to) to.value = row.conducted_to || '';
-    });
-  }
-
-  // Share conducted dates for both remedial rows (single visible inputs from row 1)
-  const r1From = document.querySelector('[name="remedial[1][conducted_from]"]');
-  const r1To = document.querySelector('[name="remedial[1][conducted_to]"]');
-  const r2From = document.querySelector('[name="remedial[2][conducted_from]"]');
-  const r2To = document.querySelector('[name="remedial[2][conducted_to]"]');
-  
-  // If row 1 dates are empty but row 2 has values from DB, use row 2 values as shared dates
-  if (r1From && r2From && !r1From.value && r2From.value) r1From.value = r2From.value;
-  if (r1To && r2To && !r1To.value && r2To.value) r1To.value = r2To.value;
-
-  syncRemedialConductedDates();
-  if (r1From) r1From.addEventListener('input', syncRemedialConductedDates);
-  if (r1To) r1To.addEventListener('input', syncRemedialConductedDates);
-
-  // Ensure remedial final rating / recomputed grade are auto-calculated on load
-  refreshRemedialDependentCalculations();
-  
   // Initialize MAPEH calculation after rendering
   calculateMapeh();
   calculateGeneralAverage();
@@ -1149,7 +899,6 @@ function calculateMapeh() {
     if (remarksInput) remarksInput.value = '';
   }
 
-  refreshRemedialDependentCalculations();
   calculateGeneralAverage();
 }
 
@@ -1180,7 +929,6 @@ function calculateFinalRating(input, subjectId) {
     remarksInput.value = '';
   }
 
-  refreshRemedialDependentCalculations();
   calculateGeneralAverage();
 }
 
@@ -1190,70 +938,6 @@ function sanitizeGradeInput(input) {
   if (isNaN(val)) return;
   if (val > 100) input.value = 100;
   if (val < 0) input.value = 0;
-}
-
-function populateRemedialSubjects() {
-  const firstColCells = document.querySelectorAll('.grades-table tbody tr td.subject-name-col');
-  const mapehComponents = ['Music', 'Arts', 'Physical Education', 'Health'];
-  const names = [];
-
-  firstColCells.forEach(cell => {
-    const input = cell.querySelector('input[name^="custom_subject_names"]');
-    let name = '';
-    if (input) {
-      name = (input.value || '').trim();
-    } else {
-      name = (cell.textContent || '').trim();
-    }
-
-    if (!name) return;
-    if (mapehComponents.includes(name)) return;
-    if (name === 'General Average') return;
-    if (!names.includes(name)) names.push(name);
-  });
-
-  const options = ['<option value="">-- Select Subject --</option>']
-    .concat(names.map(n => `<option value="${n}">${n}</option>`))
-    .join('');
-
-  const select1 = document.getElementById('remedial-subject-1');
-  const select2 = document.getElementById('remedial-subject-2');
-  if (select1) select1.innerHTML = options;
-  if (select2) select2.innerHTML = options;
-}
-
-function autoFillRemedialFinalRating(remedialNum) {
-  const select = document.querySelector(`[name="remedial[${remedialNum}][learning_area]"]`);
-  const finalRatingInput = document.querySelector(`[name="remedial[${remedialNum}][final_rating]"]`);
-  const selectedName = select ? (select.value || '').trim() : '';
-
-  if (!selectedName || !finalRatingInput) {
-    if (finalRatingInput) finalRatingInput.value = '';
-    calculateRecomputedGrade(remedialNum);
-    return;
-  }
-
-  // Find matching subject row by displayed name (supports transfer custom names)
-  const rows = document.querySelectorAll('.grades-table tbody tr');
-  let matchedFinal = '';
-
-  rows.forEach(row => {
-    const subjectCell = row.querySelector('td.subject-name-col');
-    if (!subjectCell) return;
-    const input = subjectCell.querySelector('input[name^="custom_subject_names"]');
-    const displayName = input ? (input.value || '').trim() : (subjectCell.textContent || '').trim();
-    if (displayName === selectedName) {
-      const finalInput = row.querySelector('input[name*="[final_rating]"]');
-      matchedFinal = finalInput ? finalInput.value : '';
-    }
-  });
-
-  finalRatingInput.value = matchedFinal || '';
-  calculateRecomputedGrade(remedialNum);
-}
-
-function refreshRemedialDependentCalculations() {
-  [1, 2].forEach(n => autoFillRemedialFinalRating(n));
 }
 
 function calculateGeneralAverage() {
@@ -1304,35 +988,6 @@ function calculateGeneralAverage() {
     gaFinalInput.value = '';
     gaRemarksInput.value = '';
   }
-}
-
-function calculateRecomputedGrade(remedialNum) {
-  const finalRatingInput = document.querySelector(`[name="remedial[${remedialNum}][final_rating]"]`);
-  const remedialMarkInput = document.querySelector(`[name="remedial[${remedialNum}][remedial_class_mark]"]`);
-  const recomputedInput = document.querySelector(`[name="remedial[${remedialNum}][recomputed_final_grade]"]`);
-  const remarksInput = document.querySelector(`[name="remedial[${remedialNum}][remarks]"]`);
-
-  const finalRating = parseFloat(finalRatingInput?.value) || 0;
-  const remedialMark = parseFloat(remedialMarkInput?.value) || 0;
-
-  if (finalRating > 0 && remedialMark > 0) {
-    const recomputed = Math.round((finalRating + remedialMark) / 2);
-    if (recomputedInput) recomputedInput.value = recomputed;
-    if (remarksInput) remarksInput.value = recomputed >= 75 ? 'Passed' : 'Failed';
-  } else {
-    if (recomputedInput) recomputedInput.value = '';
-    if (remarksInput) remarksInput.value = '';
-  }
-}
-
-function syncRemedialConductedDates() {
-  const from1 = document.querySelector('[name="remedial[1][conducted_from]"]')?.value || '';
-  const to1 = document.querySelector('[name="remedial[1][conducted_to]"]')?.value || '';
-  const from2 = document.querySelector('[name="remedial[2][conducted_from]"]');
-  const to2 = document.querySelector('[name="remedial[2][conducted_to]"]');
-
-  if (from2) from2.value = from1;
-  if (to2) to2.value = to1;
 }
 
 // Auto-hide alerts

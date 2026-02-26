@@ -191,6 +191,128 @@ if (!$student) {
     exit();
 }
 
+// Function to get school details with fallback to adviser's info
+function getSchoolInfo($conn, $school_row) {
+    $info = [
+        'school_name' => $school_row['school_name'] ?? '',
+        'school_id' => $school_row['school_id'] ?? '',
+        'district' => $school_row['district'] ?? '',
+        'division' => $school_row['division'] ?? '',
+        'region' => $school_row['region'] ?? ''
+    ];
+
+    // If any critical field is missing, try to fetch from the assigned adviser in the system
+    if (empty($info['school_name']) || empty($info['school_id']) || empty($info['district'])) {
+        $adviser_name = $school_row['adviser_name'] ?? '';
+        $user_match = null;
+
+        // 1. Try matching by name first
+        if (!empty($adviser_name)) {
+            $stmt = $conn->prepare("SELECT school_name, school_id, district, division, region FROM users WHERE LOWER(full_name) = LOWER(?) LIMIT 1");
+            $stmt->bind_param("s", $adviser_name);
+            $stmt->execute();
+            $user_match = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+        }
+
+        // 2. If no match by name, try matching by assignment (for internal records)
+        if (!$user_match) {
+            $grade_label = $school_row['grade_level'] ?? '';
+            $section = $school_row['section'] ?? '';
+            $school_year_str = $school_row['school_year'] ?? '';
+            
+            if ($grade_label && $section && $school_year_str) {
+                // For grade_progression.php, $grade_label is already numeric int
+                $gl_num = (int)$grade_label;
+
+                if ($gl_num) {
+                    $stmt = $conn->prepare("SELECT u.school_name, u.school_id, u.district, u.division, u.region 
+                                           FROM teacher_assignments ta
+                                           JOIN users u ON ta.teacher_id = u.id
+                                           JOIN school_years sy ON ta.school_year_id = sy.id
+                                           WHERE ta.grade_level = ? 
+                                           AND ta.section = ? 
+                                           AND ta.assignment_type = 'adviser'
+                                           AND sy.year = ?
+                                           LIMIT 1");
+                    $stmt->bind_param("iss", $gl_num, $section, $school_year_str);
+                    $stmt->execute();
+                    $user_match = $stmt->get_result()->fetch_assoc();
+                    $stmt->close();
+                }
+            }
+        }
+
+        // 3. Last fallback: try any admin user's school info as a global default
+        if (!$user_match) {
+            $admin_query = $conn->query("SELECT school_name, school_id, district, division, region FROM users WHERE role = 'admin' AND school_name IS NOT NULL AND school_name != '' LIMIT 1");
+            if ($admin_query && $admin_query->num_rows > 0) {
+                $user_match = $admin_query->fetch_assoc();
+            }
+        }
+
+        if ($user_match) {
+            if (empty($info['school_name'])) $info['school_name'] = $user_match['school_name'] ?? '';
+            if (empty($info['school_id'])) $info['school_id'] = $user_match['school_id'] ?? '';
+            if (empty($info['district'])) $info['district'] = $user_match['district'] ?? '';
+            if (empty($info['division'])) $info['division'] = $user_match['division'] ?? '';
+            if (empty($info['region'])) $info['region'] = $user_match['region'] ?? '';
+        }
+    }
+
+    return $info;
+}
+
+// Function to get adviser full name from system if available
+function getAdviserFullName($conn, $school_row) {
+    if (!$school_row) return '';
+    $adviser_name = $school_row['adviser_name'] ?? '';
+    
+    // 1. Try matching existing adviser_name to a user in the system to get their latest full name
+    if (!empty($adviser_name)) {
+        $stmt = $conn->prepare("SELECT full_name FROM users WHERE LOWER(full_name) = LOWER(?) LIMIT 1");
+        $stmt->bind_param("s", $adviser_name);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        if ($row = $res->fetch_assoc()) {
+            $stmt->close();
+            return $row['full_name'];
+        }
+        $stmt->close();
+    }
+    
+    // 2. If no name or no match, look up by assignment (for internal records with missing adviser_name)
+    $grade_label = $school_row['grade_level'] ?? '';
+    $section = $school_row['section'] ?? '';
+    $school_year_str = $school_row['school_year'] ?? '';
+    
+    if ($grade_label && $section && $school_year_str) {
+        $gl_num = (int)$grade_label;
+        
+        if ($gl_num) {
+            $stmt = $conn->prepare("SELECT u.full_name 
+                                   FROM teacher_assignments ta
+                                   JOIN users u ON ta.teacher_id = u.id
+                                   JOIN school_years sy ON ta.school_year_id = sy.id
+                                   WHERE ta.grade_level = ? 
+                                   AND ta.section = ? 
+                                   AND ta.assignment_type = 'adviser'
+                                   AND sy.year = ?
+                                   LIMIT 1");
+            $stmt->bind_param("iss", $gl_num, $section, $school_year_str);
+            $stmt->execute();
+            $res = $stmt->get_result();
+            if ($row = $res->fetch_assoc()) {
+                $stmt->close();
+                return $row['full_name'];
+            }
+            $stmt->close();
+        }
+    }
+    
+    return $adviser_name;
+}
+
 // Security Check: Ensure teacher has access to this student
 if (!has_teacher_access_to_student($conn, $user['id'], $student_id)) {
     header('Location: students.php');
@@ -198,13 +320,13 @@ if (!has_teacher_access_to_student($conn, $user['id'], $student_id)) {
 }
 
 // Get all school records for this student
-$stmt = $conn->prepare("SELECT * FROM schools_attended WHERE student_id = ? ORDER BY grade_level ASC");
+$stmt = $conn->prepare("SELECT * FROM schools_attended WHERE student_id = ? ORDER BY grade_level ASC, school_year DESC");
 $stmt->bind_param("i", $student_id);
 $stmt->execute();
 $records_result = $stmt->get_result();
 $records = [];
 while ($row = $records_result->fetch_assoc()) {
-    $records[$row['grade_level']] = $row;
+    $records[$row['grade_level']][] = $row;
 }
 
 // Handle success/error messages
@@ -281,164 +403,167 @@ include "../templates/header.php";
 
 <?php for ($grade = 1; $grade <= 6; $grade++): ?>
     <?php 
-    $has_record = isset($records[$grade]);
-    $record = $has_record ? $records[$grade] : null;
+    $grade_records = isset($records[$grade]) ? $records[$grade] : [];
     ?>
     
-    <div class="card mb-3">
-        <?php if ($has_record): ?>
-            <!-- Grade with Record -->
-            <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
-                <strong><i class="bi bi-check-circle-fill me-2"></i> Grade <?= $grade ?></strong>
-                <span class="badge bg-light text-dark"><?= htmlspecialchars($record['school_year'] ?: '-') ?></span>
-            </div>
-            <div class="card-body">
-                <div class="row mb-3">
-                    <div class="col-md-3">
-                        <small class="text-muted">School Name:</small>
-                        <p class="mb-0"><?= htmlspecialchars($record['school_name'] ?: '-') ?></p>
-                    </div>
-                    <div class="col-md-2">
-                        <small class="text-muted">School ID:</small>
-                        <p class="mb-0"><?= htmlspecialchars($record['school_id'] ?: '-') ?></p>
-                    </div>
-                    <div class="col-md-2">
-                        <small class="text-muted">Section:</small>
-                        <p class="mb-0"><?= htmlspecialchars(strtoupper($record['section'] ?: '-')) ?></p>
-                    </div>
-                    <div class="col-md-2">
-                        <small class="text-muted">District:</small>
-                        <p class="mb-0"><?= htmlspecialchars($record['district'] ?: '-') ?></p>
-                    </div>
-                    <div class="col-md-3">
-                        <small class="text-muted">Division:</small>
-                        <p class="mb-0"><?= htmlspecialchars($record['division'] ?: '-') ?></p>
-                    </div>
-                </div>
-                <div class="row mb-3">
-                    <div class="col-md-3">
-                        <small class="text-muted">Region:</small>
-                        <p class="mb-0"><?= htmlspecialchars($record['region'] ?: '-') ?></p>
-                    </div>
-                    <div class="col-md-3">
-                        <small class="text-muted">Adviser:</small>
-                        <p class="mb-0"><?= htmlspecialchars(strtoupper($record['adviser_name'] ?: '-')) ?></p>
-                    </div>
-                </div>
-                
-                <?php if ($is_admin): ?>
-                <div class="d-flex gap-2 mt-3">
-                    <button type="button" class="btn btn-sm btn-primary" data-bs-toggle="collapse" data-bs-target="#editForm<?= $grade ?>">
-                        <i class="bi bi-pencil-square"></i> Edit Details
-                    </button>
-                    <a href="enter_grades.php?student_id=<?= $student_id ?>&school_attended_id=<?= $record['id'] ?>" class="btn btn-sm btn-warning">
-                        <i class="bi bi-clipboard-check"></i> Edit Grades
-                    </a>
-                    <a href="?action=delete&id=<?= $record['id'] ?>&student_id=<?= $student_id ?>" 
-                       class="btn btn-sm btn-danger" 
-                       onclick="return confirm('Are you sure you want to delete this school record?')">
-                        <i class="bi bi-trash"></i> Delete
-                    </a>
-                </div>
-                
-                <!-- Edit Record Form (Collapsible) -->
-                <div class="collapse mt-3" id="editForm<?= $grade ?>">
-                    <hr>
-                    <h6 class="mb-3">Edit School Record Details</h6>
-                    <form method="POST" action="grade_progression.php" class="needs-validation" novalidate>
-                        <input type="hidden" name="action" value="edit">
-                        <input type="hidden" name="record_id" value="<?= $record['id'] ?>">
-                        <input type="hidden" name="student_id" value="<?= $student_id ?>">
-                        <input type="hidden" name="grade_level" value="<?= $grade ?>">
+    <div class="card mb-4">
+        <div class="card-header <?= !empty($grade_records) ? 'bg-success' : 'bg-secondary' ?> text-white d-flex justify-content-between align-items-center">
+            <strong><i class="bi <?= !empty($grade_records) ? 'bi-check-circle-fill' : 'bi-dash-circle' ?> me-2"></i> Grade <?= $grade ?></strong>
+            <?php if (!empty($grade_records)): ?>
+                <span class="badge bg-light text-dark"><?= count($grade_records) ?> Record(s)</span>
+            <?php endif; ?>
+        </div>
+        <div class="card-body <?= !empty($grade_records) ? 'p-0' : '' ?>">
+            <?php if (!empty($grade_records)): ?>
+                <?php foreach ($grade_records as $idx => $record): ?>
+                    <div class="p-4 <?= $idx > 0 ? 'border-top border-2' : '' ?>">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h5 class="mb-0 text-primary">
+                                <i class="bi bi-calendar3 me-2"></i> School Year: <?= htmlspecialchars($record['school_year'] ?: '-') ?>
+                                <?php if ($record['is_transfer']): ?>
+                                    <span class="badge bg-info ms-2">Transferee</span>
+                                <?php endif; ?>
+                            </h5>
+                        </div>
                         
-                        <div class="row g-3">
-                            <div class="col-md-6">
-                                <label class="form-label">School Year <span class="text-danger">*</span></label>
-                                <input type="text" class="form-control" name="school_year" 
-                                       value="<?= htmlspecialchars($record['school_year']) ?>"
-                                       placeholder="e.g., 2023-2024" 
-                                       pattern="\d{4}-\d{4}"
-                                       title="Format: YYYY-YYYY (e.g., 2023-2024)"
-                                       required>
-                                <div class="invalid-feedback">Please enter school year in format YYYY-YYYY</div>
+                        <?php $school_info = getSchoolInfo($conn, $record); ?>
+                        <div class="row mb-3">
+                            <div class="col-md-3">
+                                <small class="text-muted d-block">School Name:</small>
+                                <strong><?= htmlspecialchars($school_info['school_name'] ?: '-') ?></strong>
                             </div>
-                            
-                            <div class="col-md-6">
-                                <label class="form-label">School Name <span class="text-danger">*</span></label>
-                                <input type="text" class="form-control" name="school_name" 
-                                       value="<?= htmlspecialchars($record['school_name']) ?>" required>
-                                <div class="invalid-feedback">Please enter school name</div>
+                            <div class="col-md-2">
+                                <small class="text-muted d-block">School ID:</small>
+                                <strong><?= htmlspecialchars($school_info['school_id'] ?: '-') ?></strong>
                             </div>
-                            
-                            <div class="col-md-6">
-                                <label class="form-label">School ID</label>
-                                <input type="text" class="form-control" name="school_id" 
-                                       value="<?= htmlspecialchars($record['school_id'] ?: '') ?>">
+                            <div class="col-md-2">
+                                <small class="text-muted d-block">Section:</small>
+                                <strong><?= htmlspecialchars(strtoupper($record['section'] ?: '-')) ?></strong>
                             </div>
-                            
-                            <div class="col-md-6">
-                                <label class="form-label">District</label>
-                                <input type="text" class="form-control" name="district" 
-                                       value="<?= htmlspecialchars($record['district'] ?: '') ?>">
+                            <div class="col-md-2">
+                                <small class="text-muted d-block">District:</small>
+                                <strong><?= htmlspecialchars($school_info['district'] ?: '-') ?></strong>
                             </div>
-                            
-                            <div class="col-md-6">
-                                <label class="form-label">Division</label>
-                                <input type="text" class="form-control" name="division" 
-                                       value="<?= htmlspecialchars($record['division'] ?: '') ?>">
+                            <div class="col-md-3">
+                                <small class="text-muted d-block">Division:</small>
+                                <strong><?= htmlspecialchars($school_info['division'] ?: '-') ?></strong>
                             </div>
-                            
-                            <div class="col-md-6">
-                                <label class="form-label">Region</label>
-                                <input type="text" class="form-control" name="region" 
-                                       value="<?= htmlspecialchars($record['region'] ?: '') ?>">
+                        </div>
+                        <div class="row mb-3">
+                            <div class="col-md-3">
+                                <small class="text-muted d-block">Region:</small>
+                                <strong><?= htmlspecialchars($school_info['region'] ?: '-') ?></strong>
                             </div>
-                            
-                            <div class="col-md-6">
-                                <label class="form-label">Section <span class="text-danger">*</span></label>
-                                <input type="text" class="form-control" name="section" 
-                                       value="<?= htmlspecialchars($record['section']) ?>" required>
-                                <div class="invalid-feedback">Please enter section</div>
-                            </div>
-                            
-                            <div class="col-md-6">
-                                <label class="form-label">Adviser Name</label>
-                                <input type="text" class="form-control" name="adviser_name" 
-                                       value="<?= htmlspecialchars($record['adviser_name'] ?: '') ?>">
+                            <div class="col-md-3">
+                                <small class="text-muted d-block">Adviser:</small>
+                                <strong><?= htmlspecialchars(strtoupper(getAdviserFullName($conn, $record) ?: '-')) ?></strong>
                             </div>
                         </div>
                         
-                        <div class="mt-3">
-                            <button type="submit" class="btn btn-primary">
-                                <i class="bi bi-save"></i> Update Record
+                        <?php if ($is_admin): ?>
+                        <div class="d-flex gap-2 mt-3">
+                            <button type="button" class="btn btn-sm btn-primary" data-bs-toggle="collapse" data-bs-target="#editForm<?= $record['id'] ?>">
+                                <i class="bi bi-pencil-square"></i> Edit Details
                             </button>
-                            <button type="button" class="btn btn-secondary" data-bs-toggle="collapse" data-bs-target="#editForm<?= $grade ?>">
-                                Cancel
-                            </button>
+                            <a href="enter_grades.php?student_id=<?= $student_id ?>&school_attended_id=<?= $record['id'] ?>" class="btn btn-sm btn-warning">
+                                <i class="bi bi-clipboard-check"></i> Edit Grades
+                            </a>
+                            <a href="?action=delete&id=<?= $record['id'] ?>&student_id=<?= $student_id ?>" 
+                               class="btn btn-sm btn-danger" 
+                               onclick="return confirm('Are you sure you want to delete this school record?')">
+                                <i class="bi bi-trash"></i> Delete
+                            </a>
                         </div>
-                    </form>
-                </div>
-                <?php endif; ?>
-            </div>
-            
-        <?php else: ?>
-            <!-- Grade without Record -->
-            <div class="card-header bg-secondary text-white">
-                <strong><i class="bi bi-dash-circle me-2"></i> Grade <?= $grade ?></strong>
-            </div>
-            <div class="card-body">
+                        
+                        <!-- Edit Record Form (Collapsible) -->
+                        <div class="collapse mt-3" id="editForm<?= $record['id'] ?>">
+                            <div class="card card-body shadow-sm">
+                                <h6 class="mb-3 text-primary"><i class="bi bi-pencil-square me-2"></i>Edit School Record Details (SY <?= htmlspecialchars($record['school_year']) ?>)</h6>
+                                <form method="POST" action="grade_progression.php" class="needs-validation" novalidate>
+                                    <input type="hidden" name="action" value="edit">
+                                    <input type="hidden" name="record_id" value="<?= $record['id'] ?>">
+                                    <input type="hidden" name="student_id" value="<?= $student_id ?>">
+                                    <input type="hidden" name="grade_level" value="<?= $grade ?>">
+                                    
+                                    <div class="row g-3">
+                                        <div class="col-md-6">
+                                            <label class="form-label text-body">School Year <span class="text-danger">*</span></label>
+                                            <input type="text" class="form-control" name="school_year" 
+                                                   value="<?= htmlspecialchars($record['school_year']) ?>"
+                                                   placeholder="e.g., 2023-2024" 
+                                                   pattern="\d{4}-\d{4}"
+                                                   required>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label text-body">School Name <span class="text-danger">*</span></label>
+                                            <input type="text" class="form-control" name="school_name" 
+                                                   value="<?= htmlspecialchars($school_info['school_name'] ?: '') ?>" required>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label text-body">School ID</label>
+                                            <input type="text" class="form-control" name="school_id" 
+                                                   value="<?= htmlspecialchars($school_info['school_id'] ?: '') ?>">
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label text-body">District</label>
+                                            <input type="text" class="form-control" name="district" 
+                                                   value="<?= htmlspecialchars($school_info['district'] ?: '') ?>">
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label text-body">Division</label>
+                                            <input type="text" class="form-control" name="division" 
+                                                   value="<?= htmlspecialchars($school_info['division'] ?: '') ?>">
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label text-body">Region</label>
+                                            <input type="text" class="form-control" name="region" 
+                                                   value="<?= htmlspecialchars($school_info['region'] ?: '') ?>">
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label text-body">Section <span class="text-danger">*</span></label>
+                                            <input type="text" class="form-control" name="section" 
+                                                   value="<?= htmlspecialchars($record['section']) ?>" required>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label text-body">Adviser Name</label>
+                                            <input type="text" class="form-control" name="adviser_name" 
+                                                   value="<?= htmlspecialchars(getAdviserFullName($conn, $record) ?: '') ?>">
+                                        </div>
+                                    </div>
+                                    <div class="mt-3">
+                                        <button type="submit" class="btn btn-primary btn-sm">Save Changes</button>
+                                        <button type="button" class="btn btn-secondary btn-sm" data-bs-toggle="collapse" data-bs-target="#editForm<?= $record['id'] ?>">Cancel</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                        <?php endif; ?>
+                    </div>
+                <?php endforeach; ?>
+                
                 <?php if ($is_admin): ?>
-                    <!-- Add New Record Form -->
-                    <p class="text-muted text-center mb-3">
-                        <i class="bi bi-info-circle"></i> No record for this grade level
-                    </p>
-                    <div class="text-center">
-                        <button type="button" class="btn btn-info" data-bs-toggle="collapse" data-bs-target="#addForm<?= $grade ?>">
-                            <i class="bi bi-plus-circle"></i> Add School Record
+                    <div class="p-3 border-top text-center">
+                        <button type="button" class="btn btn-sm btn-info text-white shadow-sm" data-bs-toggle="collapse" data-bs-target="#addForm<?= $grade ?>">
+                            <i class="bi bi-plus-circle"></i> Add Another Record for Grade <?= $grade ?>
                         </button>
                     </div>
-                    
-                    <div class="collapse mt-3" id="addForm<?= $grade ?>">
+                <?php endif; ?>
+            <?php else: ?>
+                <div class="p-4 text-center">
+                    <p class="text-muted mb-3">No record for this grade level</p>
+                    <?php if ($is_admin): ?>
+                        <button type="button" class="btn btn-info text-white shadow-sm" data-bs-toggle="collapse" data-bs-target="#addForm<?= $grade ?>">
+                            <i class="bi bi-plus-circle"></i> Add School Record
+                        </button>
+                    <?php endif; ?>
+                </div>
+            <?php endif; ?>
+
+            <?php if ($is_admin): ?>
+                <!-- Add New Record Form (Shared for both cases) -->
+                <div class="collapse p-3 border-top" id="addForm<?= $grade ?>">
+                    <div class="card card-body shadow-sm mb-0">
+                        <h6 class="mb-3 text-info"><i class="bi bi-plus-circle me-2"></i>Add New School Record for Grade <?= $grade ?></h6>
                         <form method="POST" action="grade_progression.php" class="needs-validation" novalidate>
                             <input type="hidden" name="action" value="add">
                             <input type="hidden" name="student_id" value="<?= $student_id ?>">
@@ -447,72 +572,46 @@ include "../templates/header.php";
                             <div class="row g-3">
                                 <div class="col-md-6">
                                     <label class="form-label">School Year <span class="text-danger">*</span></label>
-                                    <input type="text" class="form-control" name="school_year" 
-                                           placeholder="e.g., 2023-2024" 
-                                           pattern="\d{4}-\d{4}"
-                                           title="Format: YYYY-YYYY (e.g., 2023-2024)"
-                                           required>
-                                    <div class="invalid-feedback">Please enter school year in format YYYY-YYYY</div>
+                                    <input type="text" class="form-control" name="school_year" placeholder="e.g., 2023-2024" pattern="\d{4}-\d{4}" required>
                                 </div>
-                                
                                 <div class="col-md-6">
                                     <label class="form-label">School Name <span class="text-danger">*</span></label>
                                     <input type="text" class="form-control" name="school_name" required>
-                                    <div class="invalid-feedback">Please enter school name</div>
                                 </div>
-                                
                                 <div class="col-md-6">
                                     <label class="form-label">School ID</label>
                                     <input type="text" class="form-control" name="school_id">
                                 </div>
-                                
                                 <div class="col-md-6">
                                     <label class="form-label">District</label>
                                     <input type="text" class="form-control" name="district">
                                 </div>
-                                
                                 <div class="col-md-6">
                                     <label class="form-label">Division</label>
                                     <input type="text" class="form-control" name="division">
                                 </div>
-                                
                                 <div class="col-md-6">
                                     <label class="form-label">Region</label>
                                     <input type="text" class="form-control" name="region">
                                 </div>
-                                
                                 <div class="col-md-6">
                                     <label class="form-label">Section <span class="text-danger">*</span></label>
                                     <input type="text" class="form-control" name="section" required>
-                                    <div class="invalid-feedback">Please enter section</div>
                                 </div>
-                                
                                 <div class="col-md-6">
                                     <label class="form-label">Adviser Name</label>
                                     <input type="text" class="form-control" name="adviser_name">
                                 </div>
                             </div>
-                            
                             <div class="mt-3">
-                                <button type="submit" class="btn btn-primary">
-                                    <i class="bi bi-save"></i> Save Record
-                                </button>
+                                <button type="submit" class="btn btn-primary btn-sm">Save Record</button>
+                                <button type="button" class="btn btn-secondary btn-sm" data-bs-toggle="collapse" data-bs-target="#addForm<?= $grade ?>">Cancel</button>
                             </div>
                         </form>
                     </div>
-                <?php else: ?>
-                    <!-- Non-admin View -->
-                    <p class="text-muted text-center mb-3">
-                        <i class="bi bi-info-circle"></i> No record for this grade level
-                    </p>
-                    <div class="text-center">
-                        <button class="btn btn-secondary btn-sm" disabled title="Only administrators can add school records">
-                            <i class="bi bi-lock"></i> Admins Only
-                        </button>
-                    </div>
-                <?php endif; ?>
-            </div>
-        <?php endif; ?>
+                </div>
+            <?php endif; ?>
+        </div>
     </div>
 <?php endfor; ?>
 
@@ -594,13 +693,7 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 
 <style>
-/* Card styling to match modal design - Dark/Light Mode Support */
-.card {
-    background-color: var(--bs-body-bg);
-    border-color: var(--bs-border-color);
-    border-radius: 0.375rem;
-}
-
+/* Card styling refinements */
 .card-header {
     padding: 1rem 1.25rem;
     font-weight: 500;
@@ -609,50 +702,16 @@ document.addEventListener('DOMContentLoaded', function() {
 .card-header.bg-success {
     background-color: #28a745 !important;
     color: #ffffff !important;
-    border-color: #28a745 !important;
 }
 
 .card-header.bg-secondary {
     background-color: #6c757d !important;
     color: #ffffff !important;
-    border-color: #6c757d !important;
 }
 
 .card-header.bg-primary {
     background-color: #007bff !important;
     color: #ffffff !important;
-    border-color: #007bff !important;
-}
-
-.card-body {
-    padding: 1.25rem;
-    background-color: var(--bs-body-bg);
-    color: var(--bs-body-color);
-}
-
-/* Make form inputs more compact */
-.needs-validation .form-control {
-    font-size: 0.9rem;
-    background-color: var(--bs-body-bg);
-    color: var(--bs-body-color);
-    border-color: var(--bs-border-color);
-}
-
-.needs-validation .form-control:focus {
-    background-color: var(--bs-body-bg);
-    color: var(--bs-body-color);
-    border-color: #80bdff;
-}
-
-.needs-validation .form-label {
-    font-weight: 500;
-    margin-bottom: 0.25rem;
-    font-size: 0.9rem;
-    color: var(--bs-body-color);
-}
-
-.text-muted {
-    color: var(--bs-secondary-color) !important;
 }
 
 /* Badge styling */
