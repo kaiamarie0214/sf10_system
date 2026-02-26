@@ -25,7 +25,11 @@ xmlns="http://www.w3.org/TR/REC-html40">
     html, body {
         margin: 0 !important;
         padding: 0 !important;
+        width: 8.5in !important;
+        height: 13in !important;
+        overflow: hidden !important;
     }
+    header, footer { display: none !important; }
 }
 </style>
 <script language="JavaScript">

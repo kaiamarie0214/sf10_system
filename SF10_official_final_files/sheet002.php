@@ -363,6 +363,7 @@ xmlns="http://www.w3.org/TR/REC-html40">
 	mso-footer-margin:0in;
 	mso-horizontal-page-align:center;
     size: 8.5in 13in; /* Long Bond Paper / Legal Size (PH) */}
+
 @media print {
     @page {
         size: 8.5in 13in;
@@ -374,23 +375,24 @@ xmlns="http://www.w3.org/TR/REC-html40">
         width: 8.5in !important;
         height: 13in !important;
         overflow: hidden !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
     }
     body {
-        background-color: white;
+        background-color: white !important;
         display: block !important;
     }
     .form-container {
         box-shadow: none !important;
         width: 1149px !important;
-        margin: 0 !important;
+        margin: 0 auto !important;
         padding: 0 !important;
         position: absolute;
         top: 0;
-        left: 0;
-        /* Non-proportional scaling to fit legal size edge-to-edge */
-        transform: scale(0.71, 0.65); 
-        transform-origin: top left;
-        max-height: 19in; 
+        left: 50%;
+        transform: translateX(-50%);
+        /* Forced scaling to fit edge-to-edge on 8.5x13 paper */
+        zoom: 0.64;
     }
     .no-print {
         display: none !important;
@@ -398,15 +400,19 @@ xmlns="http://www.w3.org/TR/REC-html40">
         visibility: hidden !important;
     }
     table {
-        page-break-inside: auto !important;
+        page-break-inside: avoid !important;
         page-break-after: avoid !important;
         border-collapse: collapse !important;
+        margin: 0 auto !important;
     }
     tr {
         page-break-inside: avoid !important;
         page-break-after: auto !important;
     }
+    /* Suppress browser headers/footers */
+    header, footer { display: none !important; }
 }
+
 body {
     display: flex;
     flex-direction: column;
@@ -421,21 +427,6 @@ body {
     box-shadow: 0 0 10px rgba(0,0,0,0.1);
 }
 -->
-</style>
-<style>
-@media print {
-    @page {
-        size: 8.5in 13in;
-        margin: 0 !important;
-    }
-    html, body {
-        width: 8.5in !important;
-        height: 13in !important;
-        margin: 0 !important;
-        padding: 0 !important;
-    }
-    header, footer { display: none !important; }
-}
 </style>
 <![if !supportTabStrip]><script language="JavaScript">
 <!--
@@ -462,16 +453,22 @@ else
 <body link="#0563C1" vlink="#954F72">
 
 <!-- Back to preview card (hidden when printing) -->
-<div class="no-print" style="width: 100%; max-width: 1149px; margin-bottom: 15px; display: flex; gap: 10px;">
-   <div style="display:inline-block; background:#6c757d; color:#fff; border-radius:6px; padding:8px 12px; cursor: pointer;" onclick="if(window.parent && window.parent.closeTab){window.parent.closeTab();}else if(window.top && window.top.closeTab){window.top.closeTab();}else{window.location.href='../pages/sf10_preview.php?student_id=<?= isset($student_id) ? intval($student_id) : '' ?>';}">
-      <span style="color:inherit; text-decoration:none; font-weight:600;">
-         &larr; Back to Preview
-      </span>
+<div class="no-print" style="width: 100%; max-width: 1149px; margin-bottom: 15px;">
+   <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px;">
+      <div style="display:inline-block; background:#6c757d; color:#fff; border-radius:6px; padding:8px 12px; cursor: pointer;" onclick="if(window.parent && window.parent.closeTab){window.parent.closeTab();}else if(window.top && window.top.closeTab){window.top.closeTab();}else{window.location.href='../pages/sf10_preview.php?student_id=<?= isset($student_id) ? intval($student_id) : '' ?>';}">
+         <span style="color:inherit; text-decoration:none; font-weight:600;">
+            &larr; Back to Preview
+         </span>
+      </div>
+      <div style="display:inline-block; background:#198754; color:#fff; border-radius:6px; padding:8px 12px; cursor: pointer;" onclick="window.print()">
+         <span style="font-weight:600;">
+            <i class="bi bi-printer"></i> Print Form (Legal Size)
+         </span>
+      </div>
    </div>
-   <div style="display:inline-block; background:#198754; color:#fff; border-radius:6px; padding:8px 12px; cursor: pointer;" onclick="window.print()">
-      <span style="font-weight:600;">
-         <i class="bi bi-printer"></i> Print Form (Legal Size)
-      </span>
+   <div style="background: #fff3cd; border: 1px solid #ffeeba; color: #856404; padding: 10px 15px; border-radius: 6px; font-size: 14px; display: flex; align-items: center; gap: 10px;">
+      <i class="bi bi-exclamation-triangle-fill"></i>
+      <span><strong>Reminder:</strong> For a perfect fit, set <strong>Paper Size</strong> to <strong>Legal (8.5" x 13")</strong> and <strong>Margins</strong> to <strong>None</strong> in the print settings.</span>
    </div>
 </div>
 
@@ -4050,692 +4047,6 @@ if (!empty($grades_grade8) && is_array($grades_grade8)) {
   <td></td>
   <td colspan=9 class=xl272>SFRT Revised
   2017</td>
- </tr>
- <tr class=xl242 height=22 style='mso-height-source:
-  userset;height:16.5pt'>
-  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
- </tr>
- <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
-  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
- </tr>
- <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
-  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
- </tr>
- <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
-  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
- </tr>
- <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
-  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
- </tr>
- <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
-  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
- </tr>
- <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
-  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
- </tr>
- <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
-  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
- </tr>
- <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
-  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
- </tr>
- <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
-  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
- </tr>
- <tr class=xl242 height=22 style='mso-height-source:userset;height:16.5pt'>
-  <td height=22 class=xl242 style='height:16.5pt'>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
-  <td class=xl242>&nbsp;</td>
- </tr>
- <![if supportMisalignedColumns]>
- <tr height=0 style='display:none'>
-  <td width=7 style='width:5pt'></td>
-  <td width=41 style='width:31pt'></td>
-  <td width=19 style='width:14pt'></td>
-  <td width=40 style='width:30pt'></td>
-  <td width=37 style='width:28pt'></td>
-  <td width=23 style='width:17pt'></td>
-  <td width=21 style='width:16pt'></td>
-  <td width=41 style='width:31pt'></td>
-  <td width=12 style='width:9pt'></td>
-  <td width=34 style='width:26pt'></td>
-  <td width=33 style='width:25pt'></td>
-  <td width=23 style='width:17pt'></td>
-  <td width=16 style='width:12pt'></td>
-  <td width=33 style='width:25pt'></td>
-  <td width=35 style='width:26pt'></td>
-  <td width=17 style='width:13pt'></td>
-  <td width=17 style='width:13pt'></td>
-  <td width=28 style='width:21pt'></td>
-  <td width=33 style='width:25pt'></td>
-  <td width=56 style='width:42pt'></td>
-  <td width=13 style='width:10pt'></td>
-  <td width=40 style='width:30pt'></td>
-  <td width=19 style='width:14pt'></td>
-  <td width=19 style='width:14pt'></td>
-  <td width=58 style='width:44pt'></td>
-  <td width=21 style='width:16pt'></td>
-  <td width=8 style='width:6pt'></td>
-  <td width=14 style='width:11pt'></td>
-  <td width=31 style='width:23pt'></td>
-  <td width=10 style='width:8pt'></td>
-  <td width=22 style='width:17pt'></td>
-  <td width=10 style='width:8pt'></td>
-  <td width=2 style='width:2pt'></td>
-  <td width=5 style='width:4pt'></td>
-  <td width=6 style='width:5pt'></td>
-  <td width=23 style='width:17pt'></td>
-  <td width=6 style='width:5pt'></td>
-  <td width=12 style='width:9pt'></td>
-  <td width=26 style='width:20pt'></td>
-  <td width=16 style='width:12pt'></td>
-  <td width=12 style='width:9pt'></td>
-  <td width=12 style='width:9pt'></td>
-  <td width=12 style='width:9pt'></td>
-  <td width=24 style='width:18pt'></td>
-  <td width=14 style='width:11pt'></td>
-  <td width=17 style='width:13pt'></td>
-  <td width=24 style='width:18pt'></td>
-  <td width=16 style='width:12pt'></td>
-  <td width=33 style='width:25pt'></td>
-  <td width=52 style='width:39pt'></td>
-  <td width=6 style='width:5pt'></td>
-  <td width=0></td>
-  <td width=0></td>
-  <td width=0></td>
-  <td width=0></td>
  </tr>
  <![endif]>
 </table>

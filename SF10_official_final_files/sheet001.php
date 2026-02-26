@@ -375,6 +375,7 @@ x\:* {behavior:url(#default#VML);}
 	mso-footer-margin:0in;
 	mso-horizontal-page-align:center;
     size: 8.5in 13in; /* Long Bond Paper / Legal Size (PH) */}
+
 @media print {
     @page {
         size: 8.5in 13in;
@@ -386,23 +387,24 @@ x\:* {behavior:url(#default#VML);}
         width: 8.5in !important;
         height: 13in !important;
         overflow: hidden !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
     }
     body {
-        background-color: white;
+        background-color: white !important;
         display: block !important;
     }
     .form-container {
         box-shadow: none !important;
         width: 1152px !important;
-        margin: 0 !important;
+        margin: 0 auto !important;
         padding: 0 !important;
         position: absolute;
         top: 0;
-        left: 0;
-        /* Non-proportional scaling to fit legal size edge-to-edge */
-        transform: scale(0.708, 0.65); 
-        transform-origin: top left;
-        max-height: 19in; /* Allow internal content height but container is clipped by body */
+        left: 50%;
+        transform: translateX(-50%);
+        /* Balanced zoom for sheet1 centering */
+        zoom: 0.68;
     }
     .no-print {
         display: none !important;
@@ -410,15 +412,19 @@ x\:* {behavior:url(#default#VML);}
         visibility: hidden !important;
     }
     table {
-        page-break-inside: auto !important;
+        page-break-inside: avoid !important;
         page-break-after: avoid !important;
         border-collapse: collapse !important;
+        margin: 0 auto !important;
     }
     tr {
         page-break-inside: avoid !important;
         page-break-after: auto !important;
     }
+    /* Suppress browser headers/footers */
+    header, footer { display: none !important; }
 }
+
 body {
     display: flex;
     flex-direction: column;
@@ -433,21 +439,6 @@ body {
     box-shadow: 0 0 10px rgba(0,0,0,0.1);
 }
 -->
-</style>
-<style>
-@media print {
-    @page {
-        size: 8.5in 13in;
-        margin: 0 !important;
-    }
-    html, body {
-        width: 8.5in !important;
-        height: 13in !important;
-        margin: 0 !important;
-        padding: 0 !important;
-    }
-    header, footer { display: none !important; }
-}
 </style>
 <![if !supportTabStrip]><script language="JavaScript">
 <!--
@@ -474,16 +465,22 @@ else
 <body link="#0563C1" vlink="#954F72">
 
 <!-- Back to preview card (hidden when printing) -->
-<div class="no-print" style="width: 100%; max-width: 1152px; margin-bottom: 15px; display: flex; gap: 10px;">
-   <div style="display:inline-block; background:#6c757d; color:#fff; border-radius:6px; padding:8px 12px; cursor: pointer;" onclick="if(window.parent && window.parent.closeTab){window.parent.closeTab();}else if(window.top && window.top.closeTab){window.top.closeTab();}else{window.location.href='../pages/sf10_preview.php?student_id=<?= isset($student_id) ? intval($student_id) : '' ?>';}">
-      <span style="color:inherit; text-decoration:none; font-weight:600;">
-         &larr; Back to Preview
-      </span>
+<div class="no-print" style="width: 100%; max-width: 1152px; margin-bottom: 15px;">
+   <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px;">
+      <div style="display:inline-block; background:#6c757d; color:#fff; border-radius:6px; padding:8px 12px; cursor: pointer;" onclick="if(window.parent && window.parent.closeTab){window.parent.closeTab();}else if(window.top && window.top.closeTab){window.top.closeTab();}else{window.location.href='../pages/sf10_preview.php?student_id=<?= isset($student_id) ? intval($student_id) : '' ?>';}">
+         <span style="color:inherit; text-decoration:none; font-weight:600;">
+            &larr; Back to Preview
+         </span>
+      </div>
+      <div style="display:inline-block; background:#198754; color:#fff; border-radius:6px; padding:8px 12px; cursor: pointer;" onclick="window.print()">
+         <span style="font-weight:600;">
+            <i class="bi bi-printer"></i> Print Form (Legal Size)
+         </span>
+      </div>
    </div>
-   <div style="display:inline-block; background:#198754; color:#fff; border-radius:6px; padding:8px 12px; cursor: pointer;" onclick="window.print()">
-      <span style="font-weight:600;">
-         <i class="bi bi-printer"></i> Print Form (Legal Size)
-      </span>
+   <div style="background: #fff3cd; border: 1px solid #ffeeba; color: #856404; padding: 10px 15px; border-radius: 6px; font-size: 14px; display: flex; align-items: center; gap: 10px;">
+      <i class="bi bi-exclamation-triangle-fill"></i>
+      <span><strong>Reminder:</strong> For a perfect fit, set <strong>Paper Size</strong> to <strong>Legal (8.5" x 13")</strong> and <strong>Margins</strong> to <strong>None</strong> in the print settings.</span>
    </div>
 </div>
 
