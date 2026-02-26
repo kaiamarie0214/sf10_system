@@ -411,6 +411,17 @@ if (!empty($students)) {
     }
 }
 
+    // Get Global Locks for Headers (for display in table header)
+    $global_locks = [1 => false, 2 => false, 3 => false, 4 => false];
+    $gl_query = "SELECT quarter, locked FROM quarter_locks WHERE school_attended_id IS NULL AND school_year = ?";
+    $gl_stmt = $conn->prepare($gl_query);
+    $gl_stmt->bind_param("s", $active_school_year);
+    $gl_stmt->execute();
+    $gl_result = $gl_stmt->get_result();
+    while ($row = $gl_result->fetch_assoc()) {
+        $global_locks[$row['quarter']] = $row['locked'] == 1;
+    }
+
 include_once "../templates/header.php";
 
 // Get active subject (default to first subject)
@@ -490,13 +501,33 @@ if (!$active_subject && count($subjects) > 0) {
                 <table class="table table-bordered table-hover mb-0">
                     <thead class="table-light sticky-top">
                         <tr>
-                            <th>Name</th>
-                            <th>Gender</th>
-                            <th class="text-center">Q1</th>
-                            <th class="text-center">Q2</th>
-                            <th class="text-center">Q3</th>
-                            <th class="text-center">Q4</th>
-                            <th class="text-center">Average</th>
+                            <th class="align-middle">Name</th>
+                            <th class="align-middle">Gender</th>
+                            <th class="text-center align-middle">
+                                Q1
+                                <?php if ($global_locks[1]): ?>
+                                    <i class="bi bi-lock-fill lock-icon" title="Quarter 1 Locked"></i>
+                                <?php endif; ?>
+                            </th>
+                            <th class="text-center align-middle">
+                                Q2
+                                <?php if ($global_locks[2]): ?>
+                                    <i class="bi bi-lock-fill lock-icon" title="Quarter 2 Locked"></i>
+                                <?php endif; ?>
+                            </th>
+                            <th class="text-center align-middle">
+                                Q3
+                                <?php if ($global_locks[3]): ?>
+                                    <i class="bi bi-lock-fill lock-icon" title="Quarter 3 Locked"></i>
+                                <?php endif; ?>
+                            </th>
+                            <th class="text-center align-middle">
+                                Q4
+                                <?php if ($global_locks[4]): ?>
+                                    <i class="bi bi-lock-fill lock-icon" title="Quarter 4 Locked"></i>
+                                <?php endif; ?>
+                            </th>
+                            <th class="text-center align-middle">Average</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -527,10 +558,10 @@ if (!$active_subject && count($subjects) > 0) {
                                         $grade_count++;
                                     }
                                 ?>
-                                    <td class="p-1">
+                                    <td class="p-1 align-middle text-center">
                                         <input 
                                             type="number" 
-                                            class="form-control form-control-sm text-center grade-input <?php echo $is_locked ? 'bg-light' : ''; ?>"
+                                            class="form-control form-control-sm text-center grade-input mx-auto <?php echo $is_locked ? 'bg-light' : ''; ?>"
                                             value="<?php echo htmlspecialchars($grade); ?>"
                                             min="0"
                                             max="100"
@@ -549,7 +580,7 @@ if (!$active_subject && count($subjects) > 0) {
                                 <?php endfor; 
                                 $average = $grade_count > 0 ? round($total_grades / $grade_count) : '';
                                 ?>
-                                <td class="text-center fw-bold"><?php echo $average; ?></td>
+                                <td class="text-center align-middle fw-bold"><?php echo $average; ?></td>
                             </tr>
                         <?php endforeach; ?>
                     </tbody>
@@ -733,6 +764,19 @@ function recalculateAverage(row) {
     -moz-appearance: textfield;
 }
 
+.grade-input[readonly] {
+    cursor: not-allowed;
+    background-color: #e9ecef !important; /* Grey background for light mode */
+}
+
+/* Dark mode adjustment for readonly input */
+[data-bs-theme="dark"] .grade-input[readonly],
+body.dark-theme .grade-input[readonly] {
+    background-color: #343a40 !important; /* Darker grey for dark mode */
+    color: #adb5bd;
+    border-color: #495057;
+}
+
 .grade-input:focus {
     border-color: #0d6efd;
     box-shadow: 0 0 0 0.2rem rgba(13, 110, 253, 0.25);
@@ -740,6 +784,20 @@ function recalculateAverage(row) {
 
 .table td {
     vertical-align: middle;
+}
+
+.lock-icon {
+    font-size: 1.2em;
+    margin-left: 4px;
+    color: #000000;
+}
+
+[data-bs-theme="dark"] .lock-icon {
+    color: #ffffff !important;
+}
+
+body.dark-theme .lock-icon {
+    color: #ffffff !important;
 }
 </style>
 

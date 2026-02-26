@@ -470,6 +470,15 @@ $needs_setup = $is_admin && empty($_SESSION['school_year_id']);
   </div>
   <?php endif; ?>
 
+  <!-- School Years (Admin Only) - placed above Generate SF10 -->
+  <?php if ($is_admin): ?>
+  <div class="nav-section">
+    <a href="school_years.php" class="nav-link <?= $current_page == 'school_years' ? 'active' : '' ?>">
+      <i class="bi bi-calendar3"></i> School Years
+    </a>
+  </div>
+  <?php endif; ?>
+
   <!-- SF10 Generate Section (Admin Only) -->
   <?php if ($is_admin): ?>
   <div class="nav-section">
@@ -489,8 +498,8 @@ $needs_setup = $is_admin && empty($_SESSION['school_year_id']);
   </div>
   <?php endif; ?>
 
-  <!-- School Year Management (Admin Only) - Always visible for admin -->
-  <?php if ($is_admin): ?>
+  <!-- School Year Management (Admin Only) - visible during setup -->
+  <?php if ($is_admin && $needs_setup): ?>
   <div class="nav-section">
     <a href="school_years.php" class="nav-link <?= $current_page == 'school_years' ? 'active' : '' ?>">
       <i class="bi bi-calendar3"></i> School Years

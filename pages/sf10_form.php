@@ -272,8 +272,30 @@ document.addEventListener('DOMContentLoaded', function() {
     box-shadow: 0 -2px 8px rgba(0,0,0,0.3);
   }
 
-  /* Mobile pagination adjustments */
+  /* Mobile header and pagination adjustments */
   @media (max-width: 768px) {
+    .card-header {
+      flex-direction: column;
+      align-items: stretch !important;
+      gap: 15px;
+      padding: 15px !important;
+    }
+    
+    .card-header > span {
+      text-align: center;
+      font-size: 1.1rem;
+    }
+
+    .card-header .d-flex.gap-2 {
+      flex-direction: column;
+      width: 100%;
+    }
+
+    .card-header .d-flex.gap-2 > select,
+    .card-header .d-flex.gap-2 > div {
+      width: 100% !important;
+    }
+
     .pagination-container {
       padding: 10px;
     }
@@ -310,11 +332,11 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 </style>
 
-<div class="card">
+<div class="card students-card">
     <div class="card-header d-flex justify-content-between align-items-center">
         <span>
-            <i class="bi bi-file-earmark-excel"></i> SF10 Form Generator
-            <span class="badge bg-secondary ms-2" id="studentCount"><?= number_format($total_students) ?></span>
+            <i class="bi bi-people"></i> All Students
+            <span class="badge bg-primary ms-2" id="studentCount"><?= number_format($total_students) ?></span>
         </span>
         <div class="d-flex gap-2">
             <select id="sortStudents" class="form-select form-select-sm" style="width: auto;">
