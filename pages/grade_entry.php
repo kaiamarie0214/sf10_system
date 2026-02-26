@@ -22,12 +22,24 @@ $params = [];
 $types = "";
 
 if (!empty($search)) {
-    $where_conditions[] = "(s.last_name LIKE ? OR s.first_name LIKE ? OR s.lrn LIKE ?)";
-    $search_param = "%$search%";
-    $params[] = $search_param;
-    $params[] = $search_param;
-    $params[] = $search_param;
-    $types .= "sss";
+    // Split search into individual keywords for tokenized search
+    $search_terms = preg_split('/\s+/', trim($search));
+    
+    foreach ($search_terms as $term) {
+        $where_conditions[] = "(s.last_name LIKE ? OR s.first_name LIKE ? OR s.middle_name LIKE ? OR s.lrn LIKE ? 
+                               OR CONCAT_WS(' ', s.first_name, s.middle_name, s.last_name) LIKE ?
+                               OR CONCAT(s.last_name, ', ', s.first_name, ' ', IFNULL(s.middle_name, '')) LIKE ?
+                               OR CONCAT_WS(' ', s.last_name, s.first_name, s.middle_name) LIKE ?)";
+        $search_param = "%$term%";
+        $params[] = $search_param;
+        $params[] = $search_param;
+        $params[] = $search_param;
+        $params[] = $search_param;
+        $params[] = $search_param;
+        $params[] = $search_param;
+        $params[] = $search_param;
+        $types .= "sssssss";
+    }
 }
 
 // Special sort handling for gender
@@ -40,14 +52,37 @@ if ($sort === 'filter-male') {
 $where_sql = !empty($where_conditions) ? "WHERE " . implode(" AND ", $where_conditions) : "";
 
 // Build ORDER BY clause
-$order_sql = "s.last_name, s.first_name";
+$order_sql = "";
+$search_order_params = [];
+$search_order_types = "";
+
+if (!empty($search)) {
+    $order_sql = "CASE 
+        WHEN s.lrn = ? THEN 0
+        WHEN CONCAT(s.last_name, ', ', s.first_name, ' ', IFNULL(s.middle_name, '')) = ? THEN 1
+        WHEN CONCAT(s.first_name, ' ', IFNULL(s.middle_name, ''), ' ', s.last_name) = ? THEN 2
+        WHEN s.last_name LIKE ? THEN 3
+        WHEN s.first_name LIKE ? THEN 4
+        ELSE 5 
+    END ASC, ";
+    $search_exact = trim($search);
+    $search_start = $search_exact . "%";
+    $search_order_params[] = $search_exact;
+    $search_order_params[] = $search_exact;
+    $search_order_params[] = $search_exact;
+    $search_order_params[] = $search_start;
+    $search_order_params[] = $search_start;
+    $search_order_types .= "sssss";
+}
+
 switch ($sort) {
-    case 'name-asc': $order_sql = "s.last_name ASC, s.first_name ASC"; break;
-    case 'name-desc': $order_sql = "s.last_name DESC, s.first_name DESC"; break;
-    case 'grade-asc': $order_sql = "sa.grade_level ASC, sa.section ASC"; break;
-    case 'grade-desc': $order_sql = "sa.grade_level DESC, sa.section DESC"; break;
-    case 'gender-male': $order_sql = "s.gender DESC, s.last_name ASC"; break;
-    case 'gender-female': $order_sql = "s.gender ASC, s.last_name ASC"; break;
+    case 'name-asc': $order_sql .= "s.last_name ASC, s.first_name ASC"; break;
+    case 'name-desc': $order_sql .= "s.last_name DESC, s.first_name DESC"; break;
+    case 'grade-asc': $order_sql .= "sa.grade_level ASC, sa.section ASC"; break;
+    case 'grade-desc': $order_sql .= "sa.grade_level DESC, sa.section DESC"; break;
+    case 'gender-male': $order_sql .= "s.gender DESC, s.last_name ASC"; break;
+    case 'gender-female': $order_sql .= "s.gender ASC, s.last_name ASC"; break;
+    default: $order_sql .= "s.last_name ASC, s.first_name ASC";
 }
 
 // Get total count for pagination
@@ -72,7 +107,7 @@ $page = max(1, min($total_pages, $page));
 $offset = ($page - 1) * $items_per_page;
 
 // Get students with latest school record
-$students_query = "SELECT s.id, UPPER(CONCAT(s.last_name, ', ', s.first_name)) AS fullname, s.lrn, s.gender, s.birthdate,
+$students_query = "SELECT s.id, UPPER(CONCAT(s.last_name, ', ', s.first_name, ' ', IFNULL(s.middle_name, ''))) AS fullname, s.lrn, s.gender, s.birthdate,
                           sa.grade_level, sa.section, sa.school_year
                    FROM students s
                    LEFT JOIN (
@@ -86,8 +121,8 @@ $students_query = "SELECT s.id, UPPER(CONCAT(s.last_name, ', ', s.first_name)) A
                    LIMIT ? OFFSET ?";
 
 $stmt = $conn->prepare($students_query);
-$final_types = $types . "ii";
-$final_params = array_merge($params, [$items_per_page, $offset]);
+$final_types = $types . $search_order_types . "ii";
+$final_params = array_merge($params, $search_order_params, [$items_per_page, $offset]);
 $stmt->bind_param($final_types, ...$final_params);
 $stmt->execute();
 $students = $stmt->get_result();
@@ -532,10 +567,34 @@ document.addEventListener('DOMContentLoaded', function() {
   const sortSelect = document.getElementById('sortStudents');
   
   function updateTable() {
-    const q = searchBox.value.trim();
+    const q = searchBox.value;
     const s = sortSelect.value;
-    window.location.href = `grade_entry.php?page=1&search=${encodeURIComponent(q)}&sort=${encodeURIComponent(s)}`;
+    const url = new URL(window.location.href);
+    url.searchParams.set('page', '1');
+    url.searchParams.set('search', q);
+    url.searchParams.set('sort', s);
+    
+    // Save focus and cursor position
+    if (searchBox === document.activeElement) {
+        sessionStorage.setItem('studentSearchFocus_ge', 'true');
+        sessionStorage.setItem('studentSearchCursor_ge', searchBox.selectionStart);
+    }
+    
+    window.location.href = url.toString();
   }
+  
+  // Restore focus and cursor position after reload
+  window.addEventListener('load', function() {
+      if (sessionStorage.getItem('studentSearchFocus_ge') === 'true' && searchBox) {
+          searchBox.focus();
+          const cursorPos = sessionStorage.getItem('studentSearchCursor_ge');
+          if (cursorPos !== null) {
+              searchBox.setSelectionRange(cursorPos, cursorPos);
+          }
+          sessionStorage.removeItem('studentSearchFocus_ge');
+          sessionStorage.removeItem('studentSearchCursor_ge');
+      }
+  });
   
   // Search functionality
   if (searchBox) {

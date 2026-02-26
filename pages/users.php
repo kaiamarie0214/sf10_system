@@ -315,22 +315,48 @@ $params = [];
 $types = "";
 
 if (!empty($search)) {
-    $where_conditions[] = "(u.full_name LIKE ? OR u.username LIKE ?)";
-    $search_param = "%$search%";
-    $params[] = $search_param;
-    $params[] = $search_param;
-    $types .= "ss";
+    $search_terms = preg_split('/\s+/', trim($search));
+    foreach ($search_terms as $term) {
+        $where_conditions[] = "(u.full_name LIKE ? OR u.username LIKE ? OR u.school_name LIKE ? OR u.school_id LIKE ?)";
+        $search_param = "%$term%";
+        $params[] = $search_param;
+        $params[] = $search_param;
+        $params[] = $search_param;
+        $params[] = $search_param;
+        $types .= "ssss";
+    }
 }
 
 $where_sql = !empty($where_conditions) ? "WHERE " . implode(" AND ", $where_conditions) : "";
 
 // Build ORDER BY clause
-$order_sql = "u.full_name ASC";
+$order_sql = "";
+$search_order_params = [];
+$search_order_types = "";
+
+if (!empty($search)) {
+    $order_sql = "CASE 
+        WHEN u.username = ? THEN 0
+        WHEN u.full_name = ? THEN 1
+        WHEN u.full_name LIKE ? THEN 2
+        WHEN u.username LIKE ? THEN 3
+        ELSE 4 
+    END ASC, ";
+    $search_exact = trim($search);
+    $search_start = $search_exact . "%";
+    $search_order_params[] = $search_exact;
+    $search_order_params[] = $search_exact;
+    $search_order_params[] = $search_start;
+    $search_order_params[] = $search_start;
+    $search_order_types .= "ssss";
+}
+
 switch ($sort) {
-    case 'name-asc': $order_sql = "u.full_name ASC"; break;
-    case 'name-desc': $order_sql = "u.full_name DESC"; break;
-    case 'role-admin': $order_sql = "u.role ASC, u.full_name ASC"; break;
-    case 'role-teacher': $order_sql = "u.role DESC, u.full_name ASC"; break;
+    case 'name-asc': $order_sql .= "u.full_name ASC"; break;
+    case 'name-desc': $order_sql .= "u.full_name DESC"; break;
+    case 'role-admin': $order_sql .= "u.role ASC, u.full_name ASC"; break;
+    case 'role-teacher': $order_sql .= "u.role DESC, u.full_name ASC"; break;
+    default: $order_sql .= "u.full_name ASC";
 }
 
 // Get total count for pagination
@@ -359,8 +385,8 @@ $users_query = "SELECT u.*,
                 LIMIT ? OFFSET ?";
 
 $stmt_users = $conn->prepare($users_query);
-$final_types = $types . "ii";
-$final_params = array_merge($params, [$items_per_page, $offset]);
+$final_types = $types . $search_order_types . "ii";
+$final_params = array_merge($params, $search_order_params, [$items_per_page, $offset]);
 $stmt_users->bind_param($final_types, ...$final_params);
 $stmt_users->execute();
 $users = $stmt_users->get_result();
@@ -756,10 +782,34 @@ document.addEventListener('DOMContentLoaded', function() {
     const sortSelect = document.getElementById('sortUsers');
     
     function updateTable() {
-        const q = searchInput ? searchInput.value.trim() : '';
+        const q = searchInput ? searchInput.value : '';
         const s = sortSelect ? sortSelect.value : 'name-asc';
-        window.location.href = `users.php?page=1&search=${encodeURIComponent(q)}&sort=${encodeURIComponent(s)}`;
+        const url = new URL(window.location.href);
+        url.searchParams.set('page', '1');
+        url.searchParams.set('search', q);
+        url.searchParams.set('sort', s);
+        
+        // Save focus and cursor position
+        if (searchInput === document.activeElement) {
+            sessionStorage.setItem('userSearchFocus', 'true');
+            sessionStorage.setItem('userSearchCursor', searchInput.selectionStart);
+        }
+        
+        window.location.href = url.toString();
     }
+
+    // Restore focus and cursor position after reload
+    window.addEventListener('load', function() {
+        if (sessionStorage.getItem('userSearchFocus') === 'true' && searchInput) {
+            searchInput.focus();
+            const cursorPos = sessionStorage.getItem('userSearchCursor');
+            if (cursorPos !== null) {
+                searchInput.setSelectionRange(cursorPos, cursorPos);
+            }
+            sessionStorage.removeItem('userSearchFocus');
+            sessionStorage.removeItem('userSearchCursor');
+        }
+    });
 
     if (searchInput) {
         let searchTimeout;

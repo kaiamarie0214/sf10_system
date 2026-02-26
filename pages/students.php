@@ -635,11 +635,25 @@ if (!empty($students)) {
 
 // --- APPLY FILTERS IN PHP ---
 if (!empty($search)) {
-    $search_lower = strtolower(trim($search));
-    $students = array_filter($students, function($s) use ($search_lower) {
-        $fullName = strtolower($s['last_name'] . ', ' . $s['first_name'] . ' ' . ($s['middle_name'] ?? ''));
+    // Split search into individual keywords
+    $search_terms = preg_split('/\s+/', strtolower(trim($search)));
+    
+    $students = array_filter($students, function($s) use ($search_terms) {
+        $last = strtolower($s['last_name'] ?? '');
+        $first = strtolower($s['first_name'] ?? '');
+        $middle = strtolower($s['middle_name'] ?? '');
         $lrn = strtolower($s['lrn'] ?? '');
-        return strpos($fullName, $search_lower) !== false || strpos($lrn, $search_lower) !== false;
+        
+        // Combine all searchable fields into one string
+        $searchable_string = "$last $first $middle $lrn";
+        
+        // Every search keyword must be found somewhere in the searchable string
+        foreach ($search_terms as $term) {
+            if (strpos($searchable_string, $term) === false) {
+                return false;
+            }
+        }
+        return true;
     });
 }
 
@@ -651,34 +665,69 @@ if ($sort === 'filter-male') {
 
 // Keep server-side default ordering behavior using the same sort option
 if (!empty($students)) {
-  usort($students, function($a, $b) use ($sort) {
-    $aName = strtolower(trim(($a['last_name'] ?? '') . ' ' . ($a['first_name'] ?? '')));
-    $bName = strtolower(trim(($b['last_name'] ?? '') . ' ' . ($b['first_name'] ?? '')));
+  $search_lower = !empty($search) ? strtolower(trim($search)) : '';
+  
+  usort($students, function($a, $b) use ($sort, $search_lower) {
+    $aLastName = strtolower(trim($a['last_name'] ?? ''));
+    $bLastName = strtolower(trim($b['last_name'] ?? ''));
+    $aFirstName = strtolower(trim($a['first_name'] ?? ''));
+    $bFirstName = strtolower(trim($b['first_name'] ?? ''));
+    $aFullName = $aLastName . ', ' . $aFirstName;
+    $bFullName = $bLastName . ', ' . $bFirstName;
+    
+    // If there is a search term, prioritize matches at the beginning of the name
+    if (!empty($search_lower)) {
+        // 1. EXACT MATCH PRIORITY (LRN or Full Name formats)
+        $aExact = ($a['lrn'] === $search_lower || 
+                  strtolower($aLastName . ', ' . $aFirstName . ' ' . ($a['middle_name'] ?? '')) === $search_lower ||
+                  strtolower($aFirstName . ' ' . ($a['middle_name'] ?? '') . ' ' . $aLastName) === $search_lower ||
+                  strtolower($aLastName . ' ' . $aFirstName) === $search_lower);
+                  
+        $bExact = ($b['lrn'] === $search_lower || 
+                  strtolower($bLastName . ', ' . $bFirstName . ' ' . ($b['middle_name'] ?? '')) === $search_lower ||
+                  strtolower($bFirstName . ' ' . ($b['middle_name'] ?? '') . ' ' . $bLastName) === $search_lower ||
+                  strtolower($bLastName . ' ' . $bFirstName) === $search_lower);
+
+        if ($aExact && !$bExact) return -1;
+        if (!$aExact && $bExact) return 1;
+
+        // 2. STARTS WITH PRIORITY
+        // Check if last name starts with search term
+        $aStartsLast = strpos($aLastName, $search_lower) === 0;
+        $bStartsLast = strpos($bLastName, $search_lower) === 0;
+        
+        if ($aStartsLast && !$bStartsLast) return -1;
+        if (!$aStartsLast && $bStartsLast) return 1;
+        
+        // Check if first name starts with search term (if last name didn't match start)
+        $aStartsFirst = strpos($aFirstName, $search_lower) === 0;
+        $bStartsFirst = strpos($bFirstName, $search_lower) === 0;
+        
+        if ($aStartsFirst && !$bStartsFirst) return -1;
+        if (!$aStartsFirst && $bStartsFirst) return 1;
+    }
+
     $aGrade = (int)($a['grade_level'] ?? 0);
     $bGrade = (int)($b['grade_level'] ?? 0);
     $aGender = strtolower($a['gender'] ?? '');
     $bGender = strtolower($b['gender'] ?? '');
-    $aHas = (int)($a['has_record'] ?? 0);
-    $bHas = (int)($b['has_record'] ?? 0);
 
     switch ($sort) {
       case 'name-asc':
-        return $aName <=> $bName;
+        return $aFullName <=> $bFullName;
       case 'name-desc':
-        return $bName <=> $aName;
+        return $bFullName <=> $aFullName;
       case 'grade-asc':
         return [$aGrade, strtolower((string)($a['section'] ?? ''))] <=> [$bGrade, strtolower((string)($b['section'] ?? ''))];
       case 'grade-desc':
-        return [$bGrade, strtolower((string)($b['section'] ?? ''))] <=> [$aGrade, strtolower((string)($a['section'] ?? ''))];
+        return [$bGrade, strtolower((string)($b['section'] ?? ''))] <=> [$aGrade, strtolower((string)($b['section'] ?? ''))];
       case 'gender-male':
-        return [($aGender === 'male' ? 0 : 1), $aName] <=> [($bGender === 'male' ? 0 : 1), $bName];
+        return [($aGender === 'male' ? 0 : 1), $aFullName] <=> [($bGender === 'male' ? 0 : 1), $bFullName];
       case 'gender-female':
-        return [($aGender === 'female' ? 0 : 1), $aName] <=> [($bGender === 'female' ? 0 : 1), $bName];
+        return [($aGender === 'female' ? 0 : 1), $aFullName] <=> [($bGender === 'female' ? 0 : 1), $bFullName];
       default:
-        // students without records first, then newest by created_at if available, then name
-        $aCreated = strtotime($a['created_at'] ?? '') ?: 0;
-        $bCreated = strtotime($b['created_at'] ?? '') ?: 0;
-        return [$aHas, -$aCreated, $aName] <=> [$bHas, -$bCreated, $bName];
+        // sort by name alphabetically by default
+        return $aFullName <=> $bFullName;
     }
   });
 }
@@ -1300,9 +1349,33 @@ body.dark-theme .pagination-container {
 
     function updateTable() {
         const sort = sortSelect ? sortSelect.value : '';
-        const search = searchInput ? searchInput.value.trim() : '';
-        window.location.href = `students.php?page=1&sort=${encodeURIComponent(sort)}&search=${encodeURIComponent(search)}`;
+        const search = searchInput ? searchInput.value : '';
+        const url = new URL(window.location.href);
+        url.searchParams.set('page', '1');
+        url.searchParams.set('sort', sort);
+        url.searchParams.set('search', search);
+        
+        // Save focus and cursor position
+        if (searchInput === document.activeElement) {
+            sessionStorage.setItem('studentSearchFocus', 'true');
+            sessionStorage.setItem('studentSearchCursor', searchInput.selectionStart);
+        }
+        
+        window.location.href = url.toString();
     }
+
+    // Restore focus and cursor position after reload
+    window.addEventListener('load', function() {
+        if (sessionStorage.getItem('studentSearchFocus') === 'true' && searchInput) {
+            searchInput.focus();
+            const cursorPos = sessionStorage.getItem('studentSearchCursor');
+            if (cursorPos !== null) {
+                searchInput.setSelectionRange(cursorPos, cursorPos);
+            }
+            sessionStorage.removeItem('studentSearchFocus');
+            sessionStorage.removeItem('studentSearchCursor');
+        }
+    });
 
     // Search input functionality
     if (searchInput) {

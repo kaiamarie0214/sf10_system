@@ -101,21 +101,49 @@ $params = [];
 $types = "";
 
 if (!empty($search)) {
-    $where_conditions[] = "(year LIKE ?)";
-    $search_param = "%$search%";
-    $params[] = $search_param;
-    $types .= "s";
+    $search_terms = preg_split('/\s+/', trim($search));
+    foreach ($search_terms as $term) {
+        $where_conditions[] = "(year LIKE ? OR status LIKE ?)";
+        $search_param = "%$term%";
+        $params[] = $search_param;
+        $params[] = $search_param;
+        $types .= "ss";
+    }
+}
+
+// Status filtering logic
+if ($sort === 'filter-active') {
+    $where_conditions[] = "status = 'active'";
+} elseif ($sort === 'filter-inactive') {
+    $where_conditions[] = "status = 'inactive'";
 }
 
 $where_sql = !empty($where_conditions) ? "WHERE " . implode(" AND ", $where_conditions) : "";
 
 // Build ORDER BY clause
-$order_sql = "year DESC";
+$order_sql = "";
+$search_order_params = [];
+$search_order_types = "";
+
+if (!empty($search)) {
+    $search_exact = trim($search);
+    $order_sql = "CASE 
+        WHEN year = ? THEN 0
+        WHEN year LIKE ? THEN 1
+        ELSE 2 
+    END ASC, ";
+    $search_start = $search_exact . "%";
+    $search_order_params[] = $search_exact;
+    $search_order_params[] = $search_start;
+    $search_order_types .= "ss";
+}
+
 switch ($sort) {
-    case 'year-asc': $order_sql = "year ASC"; break;
-    case 'year-desc': $order_sql = "year DESC"; break;
-    case 'status-active': $order_sql = "status ASC, year DESC"; break;
-    case 'status-inactive': $order_sql = "status DESC, year DESC"; break;
+    case 'year-asc': $order_sql .= "year ASC"; break;
+    case 'year-desc': $order_sql .= "year DESC"; break;
+    case 'status-active': $order_sql .= "status ASC, year DESC"; break;
+    case 'status-inactive': $order_sql .= "status DESC, year DESC"; break;
+    default: $order_sql .= "year DESC";
 }
 
 // Get total count for pagination
@@ -130,11 +158,10 @@ $total_pages = ceil($total_sy / $items_per_page);
 $page = max(1, min($total_pages, $page));
 $offset = ($page - 1) * $items_per_page;
 
-// Get school years with pagination
 $sy_query = "SELECT * FROM school_years $where_sql ORDER BY $order_sql LIMIT ? OFFSET ?";
 $stmt_sy = $conn->prepare($sy_query);
-$final_types = $types . "ii";
-$final_params = array_merge($params, [$items_per_page, $offset]);
+$final_types = $search_order_types . $types . "ii";
+$final_params = array_merge($search_order_params, $params, [$items_per_page, $offset]);
 $stmt_sy->bind_param($final_types, ...$final_params);
 $stmt_sy->execute();
 $school_years = $stmt_sy->get_result()->fetch_all(MYSQLI_ASSOC);
@@ -343,6 +370,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 <option value="year-asc" <?= $sort === 'year-asc' ? 'selected' : '' ?>>Year (Oldest First)</option>
                 <option value="status-active" <?= $sort === 'status-active' ? 'selected' : '' ?>>Active Status First</option>
                 <option value="status-inactive" <?= $sort === 'status-inactive' ? 'selected' : '' ?>>Inactive Status First</option>
+                <option value="filter-active" <?= $sort === 'filter-active' ? 'selected' : '' ?>>All Active</option>
+                <option value="filter-inactive" <?= $sort === 'filter-inactive' ? 'selected' : '' ?>>All Inactive</option>
             </select>
             <div style="position: relative; width: 250px;">
                 <i class="bi bi-search" style="position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: #6c757d; pointer-events: none;"></i>
@@ -542,8 +571,32 @@ document.addEventListener('DOMContentLoaded', function() {
     function updateTable() {
         const q = searchInput ? searchInput.value.trim() : '';
         const s = sortSelect ? sortSelect.value : 'year-desc';
-        window.location.href = `school_years.php?page=1&search=${encodeURIComponent(q)}&sort=${encodeURIComponent(s)}`;
+        const url = new URL(window.location.href);
+        url.searchParams.set('page', '1');
+        url.searchParams.set('search', q);
+        url.searchParams.set('sort', s);
+        
+        // Save focus and cursor position
+        if (searchInput === document.activeElement) {
+            sessionStorage.setItem('sySearchFocus', 'true');
+            sessionStorage.setItem('sySearchCursor', searchInput.selectionStart);
+        }
+        
+        window.location.href = url.toString();
     }
+
+    // Restore focus and cursor position after reload
+    window.addEventListener('load', function() {
+        if (sessionStorage.getItem('sySearchFocus') === 'true' && searchInput) {
+            searchInput.focus();
+            const cursorPos = sessionStorage.getItem('sySearchCursor');
+            if (cursorPos !== null) {
+                searchInput.setSelectionRange(cursorPos, cursorPos);
+            }
+            sessionStorage.removeItem('sySearchFocus');
+            sessionStorage.removeItem('sySearchCursor');
+        }
+    });
 
     if (searchInput) {
         let searchTimeout;

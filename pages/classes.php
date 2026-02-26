@@ -135,18 +135,36 @@ if ($filter_sy !== 'all') {
     $where[] = "school_year = '$filter_sy'";
 }
 if (!empty($search)) {
-    $search_escaped = $conn->real_escape_string($search);
-    $where[] = "(grade_level LIKE '%$search_escaped%' OR section LIKE '%$search_escaped%')";
+    $search_terms = preg_split('/\s+/', trim($search));
+    foreach ($search_terms as $term) {
+        $term_escaped = $conn->real_escape_string($term);
+        // Support searching by "Grade X", just the number, or section name
+        $where[] = "(grade_level LIKE '%$term_escaped%' 
+                   OR section LIKE '%$term_escaped%' 
+                   OR CONCAT('Grade ', grade_level) LIKE '%$term_escaped%')";
+    }
 }
 $where_sql = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
 
 // Sort logic
-$order_by = "c.grade_level, c.section";
+$order_by = "";
+if (!empty($search)) {
+    $search_exact = $conn->real_escape_string(trim($search));
+    $order_by = "CASE 
+        WHEN grade_level = '$search_exact' THEN 0
+        WHEN section = '$search_exact' THEN 1
+        WHEN grade_level LIKE '$search_exact%' THEN 2
+        WHEN section LIKE '$search_exact%' THEN 3
+        ELSE 4 
+    END ASC, ";
+}
+
 switch ($sort) {
-    case 'grade-asc': $order_by = "c.grade_level ASC, c.section ASC"; break;
-    case 'grade-desc': $order_by = "c.grade_level DESC, c.section ASC"; break;
-    case 'section-asc': $order_by = "c.section ASC, c.grade_level ASC"; break;
-    case 'section-desc': $order_by = "c.section DESC, c.grade_level ASC"; break;
+    case 'grade-asc': $order_by .= "c.grade_level ASC, c.section ASC"; break;
+    case 'grade-desc': $order_by .= "c.grade_level DESC, c.section ASC"; break;
+    case 'section-asc': $order_by .= "c.section ASC, c.grade_level ASC"; break;
+    case 'section-desc': $order_by .= "c.section DESC, c.grade_level ASC"; break;
+    default: $order_by .= "c.grade_level ASC, c.section ASC";
 }
 
 // --- PAGINATION LOGIC ---
@@ -679,7 +697,7 @@ function confirmDelete(classId, className) {
     const sortSelect = document.getElementById('sortClasses');
     
     function updateTable() {
-        const search = searchInput ? searchInput.value.trim() : '';
+        const search = searchInput ? searchInput.value : '';
         const sort = sortSelect ? sortSelect.value : 'grade-asc';
         
         // Preserve other filters
@@ -688,8 +706,35 @@ function confirmDelete(classId, className) {
         const filterStatus = urlParams.get('filter_status') || 'all';
         const filterSy = urlParams.get('filter_sy') || 'all';
         
-        window.location.href = `classes.php?page=1&filter_grade=${encodeURIComponent(filterGrade)}&filter_status=${encodeURIComponent(filterStatus)}&filter_sy=${encodeURIComponent(filterSy)}&search=${encodeURIComponent(search)}&sort=${encodeURIComponent(sort)}`;
+        const url = new URL(window.location.href);
+        url.searchParams.set('page', '1');
+        url.searchParams.set('filter_grade', filterGrade);
+        url.searchParams.set('filter_status', filterStatus);
+        url.searchParams.set('filter_sy', filterSy);
+        url.searchParams.set('search', search);
+        url.searchParams.set('sort', sort);
+
+        // Save focus and cursor position
+        if (searchInput === document.activeElement) {
+            sessionStorage.setItem('classSearchFocus', 'true');
+            sessionStorage.setItem('classSearchCursor', searchInput.selectionStart);
+        }
+        
+        window.location.href = url.toString();
     }
+
+    // Restore focus and cursor position after reload
+    window.addEventListener('load', function() {
+        if (sessionStorage.getItem('classSearchFocus') === 'true' && searchInput) {
+            searchInput.focus();
+            const cursorPos = sessionStorage.getItem('classSearchCursor');
+            if (cursorPos !== null) {
+                searchInput.setSelectionRange(cursorPos, cursorPos);
+            }
+            sessionStorage.removeItem('classSearchFocus');
+            sessionStorage.removeItem('classSearchCursor');
+        }
+    });
 
     if (searchInput) {
         let searchTimeout;
