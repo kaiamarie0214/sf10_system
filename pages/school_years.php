@@ -258,7 +258,7 @@ document.addEventListener('DOMContentLoaded', function() {
   #mainContent > * {
     flex-shrink: 0;
   }
-  #mainContent .card:last-of-type {
+  .school-years-card {
     flex: 1 1 auto;
     display: flex;
     flex-direction: column;
@@ -266,7 +266,7 @@ document.addEventListener('DOMContentLoaded', function() {
     overflow: hidden;
     margin-bottom: 0 !important;
   }
-  #mainContent .card:last-of-type .card-body {
+  .school-years-card .card-body {
     flex: 1 1 auto;
     display: flex;
     flex-direction: column;
@@ -274,7 +274,7 @@ document.addEventListener('DOMContentLoaded', function() {
     overflow: hidden;
     padding: 0 !important;
   }
-  #mainContent .card:last-of-type .table-responsive {
+  .school-years-card .table-responsive {
     flex: 1 1 auto;
     min-height: 0;
     overflow-y: auto !important;
@@ -299,23 +299,41 @@ document.addEventListener('DOMContentLoaded', function() {
 
   .pagination-container {
     flex-shrink: 0;
-    position: sticky;
-    bottom: 0;
-    z-index: 1000;
-    background: var(--card-bg);
-    border-top: 2px solid var(--border-color);
+    background: var(--card-bg, #fff);
+    border-top: 1px solid var(--border-color, #e1e5eb);
     padding: 12px 15px;
-    box-shadow: 0 -2px 8px rgba(0,0,0,0.1);
+    z-index: 100;
   }
 
   body.dark-theme .pagination-container {
     background: #242526;
     border-top-color: #3a3b3c;
-    box-shadow: 0 -2px 8px rgba(0,0,0,0.3);
   }
 
-  /* Mobile pagination adjustments */
+  /* Mobile header and pagination adjustments */
   @media (max-width: 768px) {
+    .card-header {
+      flex-direction: column;
+      align-items: stretch !important;
+      gap: 15px;
+      padding: 15px !important;
+    }
+    
+    .card-header > span {
+      text-align: center;
+      font-size: 1.1rem;
+    }
+
+    .card-header .d-flex.gap-2 {
+      flex-direction: column;
+      width: 100%;
+    }
+
+    .card-header .d-flex.gap-2 > select,
+    .card-header .d-flex.gap-2 > div {
+      width: 100% !important;
+    }
+
     .pagination-container {
       padding: 10px;
     }
@@ -358,11 +376,11 @@ document.addEventListener('DOMContentLoaded', function() {
 </style>
 
 <!-- School Years List -->
-<div class="card">
+<div class="card school-years-card">
     <div class="card-header d-flex justify-content-between align-items-center">
         <span>
             <i class="bi bi-list-ul"></i> School Years List
-            <span class="badge bg-secondary ms-2" id="syCount"><?= number_format($total_sy) ?></span>
+            <span class="badge bg-primary ms-2" id="syCount"><?= number_format($total_sy) ?></span>
         </span>
         <div class="d-flex gap-2">
             <select id="sortSY" class="form-select form-select-sm" style="width: auto;">
