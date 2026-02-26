@@ -186,36 +186,14 @@ footer {
     -webkit-overflow-scrolling: touch;
 }
 
-.logs-card-body {
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow-y: auto !important;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-}
-
-/* Desktop only - enable horizontal scroll for wide content */
+/* Ensure content doesn't wrap to force horizontal scroll ONLY on desktop */
 @media (min-width: 769px) {
-    .activity-card .card-body {
-        overflow-x: auto;
+    .log-row-container {
+        min-width: 1200px;
     }
-}
-
-/* Mobile - no horizontal scroll, stack content */
-@media (max-width: 768px) {
-    .activity-card .card-body {
-        overflow-x: hidden;
-        padding: 10px;
+    .log-row .row {
+        flex-wrap: nowrap;
     }
-}
-
-/* Hide scrollbars for body/html only */
-html::-webkit-scrollbar, body::-webkit-scrollbar {
-    display: none !important;
-}
-html, body {
-    scrollbar-width: none !important;
-    -ms-overflow-style: none !important;
 }
 
 .log-row {
@@ -226,6 +204,42 @@ html, body {
 
 .log-row .row {
     margin: 0;
+}
+
+/* Mobile - stack content and remove horizontal scroll */
+@media (max-width: 768px) {
+    .activity-card .card-body {
+        overflow-x: hidden !important;
+    }
+    .log-row-container {
+        min-width: 100% !important;
+    }
+    .log-row {
+        padding: 15px;
+        margin-bottom: 0;
+        background: transparent !important;
+        border: none !important;
+        border-bottom: 1px solid var(--border-color) !important;
+    }
+    .log-row .row {
+        flex-direction: column;
+        gap: 10px;
+        flex-wrap: wrap !important;
+    }
+    .log-row [class*="col-"] {
+        width: 100% !important;
+        padding: 0 !important;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    .log-row [class*="col-"]::before {
+        content: attr(data-label);
+        font-weight: 600;
+        min-width: 80px;
+        font-size: 12px;
+        color: var(--text-muted);
+    }
 }
 
 .log-row .col-auto,
@@ -421,68 +435,70 @@ body.dark-theme .pagination-container {
         <i class="bi bi-list-ul"></i> Activity History
     </div>
     <div class="card-body p-0 logs-card-body">
-        <?php if ($logs->num_rows > 0): ?>
-            <?php while($log = $logs->fetch_assoc()): ?>
-            <div class="log-row">
-                <div class="row align-items-center">
-                    <div class="col-auto" data-label="ID:">
-                        <span class="badge bg-secondary">#<?= $log['id'] ?></span>
-                    </div>
-                    <div class="col-md-2" data-label="Date:">
-                        <div>
-                            <div><strong><?= date('M d, Y', strtotime($log['timestamp'])) ?></strong></div>
-                            <small class="text-muted"><?= date('g:i:s A', strtotime($log['timestamp'])) ?></small><br>
-                            <small class="text-info"><?= timeAgo($log['timestamp']) ?></small>
+        <div class="log-row-container">
+            <?php if ($logs->num_rows > 0): ?>
+                <?php while($log = $logs->fetch_assoc()): ?>
+                <div class="log-row">
+                    <div class="row align-items-center">
+                        <div class="col-auto" data-label="ID:">
+                            <span class="badge bg-secondary">#<?= $log['id'] ?></span>
                         </div>
-                    </div>
-                    <div class="col-md-2" data-label="User:">
-                        <div>
-                            <div><strong><?= htmlspecialchars($log['full_name'] ?? 'System') ?></strong></div>
-                            <small class="text-muted">@<?= htmlspecialchars($log['username'] ?? 'system') ?></small>
+                        <div class="col-md-2" data-label="Date:">
+                            <div>
+                                <div><strong><?= date('M d, Y', strtotime($log['timestamp'])) ?></strong></div>
+                                <small class="text-muted"><?= date('g:i:s A', strtotime($log['timestamp'])) ?></small><br>
+                                <small class="text-info"><?= timeAgo($log['timestamp']) ?></small>
+                            </div>
                         </div>
-                    </div>
-                    <div class="col-md-1" data-label="Role:">
-                        <div>
-                            <?php if ($log['role']): ?>
-                            <span class="badge <?= $log['role'] === 'admin' ? 'bg-warning text-dark' : 'bg-info' ?>">
-                                <?= strtoupper($log['role']) ?>
-                            </span>
-                            <?php else: ?>
-                            <span class="badge bg-secondary">SYSTEM</span>
-                            <?php endif; ?>
+                        <div class="col-md-2" data-label="User:">
+                            <div>
+                                <div><strong><?= htmlspecialchars($log['full_name'] ?? 'System') ?></strong></div>
+                                <small class="text-muted">@<?= htmlspecialchars($log['username'] ?? 'system') ?></small>
+                            </div>
                         </div>
-                    </div>
-                    <div class="col-md-2" data-label="Action:">
-                        <div>
-                            <i class="bi <?= getActionIcon($log['action']) ?>"></i>
-                            <strong><?= htmlspecialchars($log['action']) ?></strong>
+                        <div class="col-md-1" data-label="Role:">
+                            <div>
+                                <?php if ($log['role']): ?>
+                                <span class="badge <?= $log['role'] === 'admin' ? 'bg-warning text-dark' : 'bg-info' ?>">
+                                    <?= strtoupper($log['role']) ?>
+                                </span>
+                                <?php else: ?>
+                                <span class="badge bg-secondary">SYSTEM</span>
+                                <?php endif; ?>
+                            </div>
                         </div>
-                    </div>
-                    <div class="col-md-1" data-label="Table:">
-                        <code><?= htmlspecialchars($log['table_name']) ?></code>
-                    </div>
-                    <div class="col-md-1" data-label="Record:">
-                        <div>
-                            <?php if ($log['record_id']): ?>
-                            <span class="badge bg-light text-dark"><?= $log['record_id'] ?></span>
-                            <?php else: ?>
-                            <span class="text-muted">-</span>
-                            <?php endif; ?>
+                        <div class="col-md-2" data-label="Action:">
+                            <div>
+                                <i class="bi <?= getActionIcon($log['action']) ?>"></i>
+                                <strong><?= htmlspecialchars($log['action']) ?></strong>
+                            </div>
                         </div>
-                    </div>
-                    <div class="col-md-2" data-label="Details:">
-                        <small><?= htmlspecialchars($log['details'] ?? 'No additional details') ?></small>
+                        <div class="col-md-1" data-label="Table:">
+                            <code><?= htmlspecialchars($log['table_name']) ?></code>
+                        </div>
+                        <div class="col-md-1" data-label="Record:">
+                            <div>
+                                <?php if ($log['record_id']): ?>
+                                <span class="badge bg-light text-dark"><?= $log['record_id'] ?></span>
+                                <?php else: ?>
+                                <span class="text-muted">-</span>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                        <div class="col-md-2" data-label="Details:">
+                            <small><?= htmlspecialchars($log['details'] ?? 'No additional details') ?></small>
+                        </div>
                     </div>
                 </div>
-            </div>
-            <?php endwhile; ?>
-        <?php else: ?>
-            <div class="text-center text-muted py-5">
-                <i class="bi bi-inbox" style="font-size: 48px; opacity: 0.3;"></i>
-                <p class="mt-2">No activity logs found</p>
-                <small>Logs will appear here as users perform actions in the system</small>
-            </div>
-        <?php endif; ?>
+                <?php endwhile; ?>
+            <?php else: ?>
+                <div class="text-center text-muted py-5" style="min-width: 100%;">
+                    <i class="bi bi-inbox" style="font-size: 48px; opacity: 0.3;"></i>
+                    <p class="mt-2">No activity logs found</p>
+                    <small>Logs will appear here as users perform actions in the system</small>
+                </div>
+            <?php endif; ?>
+        </div>
     </div>
 
     <!-- Pagination -->

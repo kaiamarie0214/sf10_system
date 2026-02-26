@@ -227,11 +227,6 @@ if ($is_admin) {
     $gl_sections_map = [];
 }
 
-// Stats (admin only)
-$total_students = $is_admin ? $conn->query("SELECT COUNT(*) as c FROM students")->fetch_assoc()['c'] : 0;
-$total_subjects = $is_admin ? $conn->query("SELECT COUNT(*) as c FROM subjects")->fetch_assoc()['c'] : 0;
-$total_grades   = $is_admin ? $conn->query("SELECT COUNT(*) as c FROM grades")->fetch_assoc()['c']   : 0;
-
 // Helper: group honor array by grade+section
 function groupHonorStudents(array $students): array {
     $grouped = [];
@@ -659,28 +654,6 @@ $tab_labels = [
         endif; ?>
     </div>
 </div><!-- /card -->
-
-<!-- Admin: Quick Links -->
-<?php if ($is_admin): ?>
-<div class="card no-print">
-    <div class="card-header"><i class="bi bi-grid me-2"></i>Other Reports</div>
-    <div class="card-body p-0">
-        <a href="sf10_form.php" class="d-flex align-items-center gap-3 px-4 py-3 text-decoration-none border-bottom" style="color:inherit;transition:background .15s" onmouseover="this.style.background='var(--bg-light,#f8f9fa)'" onmouseout="this.style.background=''">
-            <i class="bi bi-file-earmark-excel text-success fs-5"></i>
-            <div>
-                <div class="fw-semibold" style="font-size:14px">SF10 Form</div>
-                <div class="text-muted" style="font-size:12px">Generate official DepEd SF10 Excel template</div>
-            </div>
-            <i class="bi bi-chevron-right text-muted ms-auto"></i>
-        </a>
-        <div class="d-flex gap-4 px-4 py-3 small text-muted">
-            <span><i class="bi bi-people me-1"></i>Students: <strong class="text-dark"><?= $total_students ?></strong></span>
-            <span><i class="bi bi-book me-1"></i>Subjects: <strong class="text-dark"><?= $total_subjects ?></strong></span>
-            <span><i class="bi bi-pencil me-1"></i>Grade Records: <strong class="text-dark"><?= $total_grades ?></strong></span>
-        </div>
-    </div>
-</div>
-<?php endif; ?>
 
 <?php endif; // end school_year + teacher check ?>
 
