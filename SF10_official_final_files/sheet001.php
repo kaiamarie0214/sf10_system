@@ -404,7 +404,7 @@ x\:* {behavior:url(#default#VML);}
         left: 50%;
         transform: translateX(-50%);
         /* Balanced zoom for sheet1 centering */
-        zoom: 0.68;
+        zoom: 1;
     }
     .no-print {
         display: none !important;
