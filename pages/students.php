@@ -555,7 +555,34 @@ $selected_school_year_escaped = $conn->real_escape_string($selected_school_year)
 
 // Always load all students first (same source as grade_entry), then attach preferred school record
 $students = [];
-$students_result = $conn->query("SELECT * FROM students ORDER BY last_name ASC, first_name ASC");
+$user_role = $_SESSION['user']['role'];
+$user_id = $_SESSION['user']['id'];
+$school_year_id = $_SESSION['school_year_id'] ?? 0;
+
+if ($user_role === 'admin') {
+    $students_result = $conn->query("SELECT * FROM students ORDER BY last_name ASC, first_name ASC");
+} else {
+    // Teacher: Only show students assigned to them (adviser or subject teacher)
+    $teacher_students_query = "
+        SELECT DISTINCT s.* 
+        FROM students s
+        JOIN schools_attended sa ON s.id = sa.student_id
+        JOIN teacher_assignments ta ON (
+            (ta.assignment_type = 'adviser' AND sa.grade_level = ta.grade_level AND sa.section = ta.section)
+            OR 
+            (ta.assignment_type = 'subject' AND sa.grade_level = ta.grade_level AND sa.section = ta.section)
+        )
+        WHERE ta.teacher_id = ? 
+        AND ta.school_year_id = ?
+        AND sa.school_year = (SELECT year FROM school_years WHERE id = ?)
+        ORDER BY s.last_name ASC, s.first_name ASC
+    ";
+    $stmt = $conn->prepare($teacher_students_query);
+    $stmt->bind_param("iii", $user_id, $school_year_id, $school_year_id);
+    $stmt->execute();
+    $students_result = $stmt->get_result();
+}
+
 if ($students_result) {
   while ($row = $students_result->fetch_assoc()) {
     $row['school_attended_id'] = null;
@@ -657,8 +684,9 @@ if (!empty($students)) {
 }
 
 // --- PAGINATION ---
-$total_students = count($students);
-$total_pages = ceil($total_students / $items_per_page);
+$total_items = count($students);
+$total_students = $total_items;
+$total_pages = ceil($total_items / $items_per_page);
 $page = max(1, min($total_pages, $page));
 $offset = ($page - 1) * $items_per_page;
 $students_to_show = array_slice($students, $offset, $items_per_page);
@@ -840,7 +868,7 @@ document.addEventListener('DOMContentLoaded', function() {
               data-new="<?= $isNew ? '1' : '0' ?>">
             <td><?= htmlspecialchars($student['lrn']) ?></td>
             <td style="<?= $isNew ? 'font-weight: 600;' : '' ?>">
-              <i class="bi bi-person-circle"></i> <?= htmlspecialchars(strtoupper($student['last_name'] . ', ' . $student['first_name'])) ?>
+              <i class="bi bi-person-circle"></i> <?= htmlspecialchars(strtoupper($student['last_name'] . ', ' . $student['first_name'] . (!empty($student['middle_name']) ? ' ' . $student['middle_name'] : ''))) ?>
               <?php if ($isNew): ?>
                 <span class="badge bg-success ms-2">NEW</span>
               <?php elseif (!empty($student['is_transfer'])): ?>
@@ -905,7 +933,7 @@ document.addEventListener('DOMContentLoaded', function() {
     </div>
   </div>
   <!-- Pagination -->
-  <?php if ($total_pages > 1): ?>
+  <?php if ($total_items > 0): ?>
   <div class="pagination-container">
     <div class="d-flex justify-content-between align-items-center">
       <div class="text-muted">
@@ -954,21 +982,21 @@ document.addEventListener('DOMContentLoaded', function() {
       </nav>
       
       <!-- Custom Page Jump -->
-      <div class="d-flex align-items-center gap-2">
+      <div class="d-flex align-items-center gap-2 pagination-goto">
         <span class="text-muted small">Go to:</span>
-        <form method="GET" class="d-flex gap-2" onsubmit="return validatePageJump()">
+        <form method="GET" class="d-flex gap-2 align-items-center" onsubmit="return validatePageJump()">
           <input type="hidden" name="sort" value="<?= htmlspecialchars($sort) ?>">
           <input type="hidden" name="search" value="<?= htmlspecialchars($search) ?>">
           <input type="number" 
                  name="page" 
                  id="pageJump"
-                 class="form-control form-control-sm" 
+                 class="form-control form-control-sm text-center" 
                  style="width: 70px;" 
                  min="1" 
                  max="<?= $total_pages ?>"
                  placeholder="<?= $page ?>"
                  title="Enter page number (1-<?= $total_pages ?>)">
-          <button type="submit" class="btn btn-sm btn-primary">
+          <button type="submit" class="btn btn-sm btn-teal">
             <i class="bi bi-arrow-right"></i>
           </button>
         </form>
@@ -989,12 +1017,6 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     </script>
   </div>
-  <?php elseif ($total_students > 0): ?>
-  <div class="card-footer py-2">
-    <div class="text-muted" style="font-size: 0.85rem;">
-      Showing all <?= $total_students ?> students
-    </div>
-  </div>
   <?php endif; ?>
 </div>
 
@@ -1004,9 +1026,17 @@ document.addEventListener('DOMContentLoaded', function() {
     padding: 0.25rem 0.5rem;
     font-size: 0.875rem;
 }
-.card-footer {
-    background-color: var(--card-bg, #fff);
-    border-top: 1px solid rgba(0,0,0,0.125);
+
+.btn-teal {
+    background-color: var(--primary-teal);
+    border-color: var(--primary-teal);
+    color: white;
+}
+
+.btn-teal:hover {
+    background-color: var(--primary-teal-dark);
+    border-color: var(--primary-teal-dark);
+    color: white;
 }
 
 .pagination-container {
@@ -1033,13 +1063,14 @@ body.dark-theme .pagination-container {
     }
     
     .pagination-container .d-flex {
-        flex-direction: column;
-        gap: 10px;
+        flex-direction: column !important;
+        gap: 10px !important;
     }
     
     .pagination-container nav {
         width: 100%;
         overflow-x: auto;
+        order: 2;
     }
     
     .pagination-container .pagination {
@@ -1055,11 +1086,46 @@ body.dark-theme .pagination-container {
     .pagination-container .text-muted {
         text-align: center;
         font-size: 13px;
+        order: 1;
     }
     
-    /* Hide page jump on very small screens */
-    .pagination-container form {
-        display: none;
+    /* Custom Page Jump positioning on mobile */
+    .pagination-container .pagination-goto {
+        order: 3;
+        width: 100%;
+        justify-content: center;
+        flex-direction: column !important;
+        gap: 8px !important;
+    }
+
+    .pagination-container .pagination-goto form {
+        display: flex !important;
+        justify-content: center;
+        width: 100%;
+        flex-direction: column !important;
+        gap: 5px !important;
+    }
+
+    .pagination-container .pagination-goto input {
+        width: 70px !important;
+        margin: 0 auto !important;
+        text-align: center !important;
+    }
+
+    .pagination-container .pagination-goto .btn-teal {
+        width: 70px !important;
+        margin: 0 auto !important;
+        padding: 6px !important;
+    }
+
+    /* Increase height to accommodate stacked pagination on mobile */
+    .students-card {
+      height: auto;
+      max-height: calc(100vh - 180px);
+    }
+    html, body {
+      overflow: auto !important;
+      height: auto;
     }
 }
 </style>

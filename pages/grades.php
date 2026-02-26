@@ -7,6 +7,12 @@ date_default_timezone_set('Asia/Manila');
 
 // Handle form submission BEFORE any HTML output
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['grades'])) {
+    // Security Check: Ensure teacher has access to this student
+    if (!has_teacher_access_to_student($conn, $_SESSION['user']['id'], $_POST['student_id'])) {
+        header("Location: students.php");
+        exit;
+    }
+
     // Get current user role
     $current_user_role = $_SESSION['user']['role'];
     
@@ -5369,7 +5375,7 @@ function renderSubjectsList(gradeLevel, subjects) {
                                data-grade-level="${gradeLevel}"
                                data-subject-id="${subject.subject_id}"
                                value="${subject.subject_name}"
-                               placeholder="Enter display name for this subject">
+                               placeholder="">
                     </div>
                 </div>
             </div>`;

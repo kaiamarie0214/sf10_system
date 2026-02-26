@@ -26,13 +26,13 @@ if ($is_teacher && $teacher_class) {
     $grade_level = $teacher_class['grade_level'];
     $section = $teacher_class['section'];
     
-        $total_students_stmt = $conn->prepare("SELECT COUNT(DISTINCT sa.student_id) as count
-                                                                            FROM schools_attended sa
-                                                                            WHERE sa.grade_level = ? AND LOWER(sa.section) = LOWER(?) AND sa.school_year = ?
-                                                                              AND sa.active = 1");
-        $total_students_stmt->bind_param("iss", $grade_level, $section, $current_school_year);
-        $total_students_stmt->execute();
-        $total_students = $total_students_stmt->get_result()->fetch_assoc()['count'];
+    $total_students_stmt = $conn->prepare("SELECT COUNT(DISTINCT sa.student_id) as count
+                                            FROM schools_attended sa
+                                            WHERE sa.grade_level = ? AND LOWER(sa.section) = LOWER(?) AND sa.school_year = ?
+                                              AND sa.active = 1");
+    $total_students_stmt->bind_param("iss", $grade_level, $section, $current_school_year);
+    $total_students_stmt->execute();
+    $total_students = $total_students_stmt->get_result()->fetch_assoc()['count'];
     
     // Get subjects assigned to this teacher
     $total_subjects = $conn->prepare("SELECT COUNT(DISTINCT subject_id) as count FROM teacher_assignments 
@@ -51,7 +51,7 @@ if ($is_teacher && $teacher_class) {
     $total_records = $total_records->get_result()->fetch_assoc()['count'];
     
     $total_classes = 1; // Teacher has one class
-} else {
+} elseif ($is_admin) {
     // Admin stats - global
     $total_students = $conn->query("SELECT COUNT(*) as count FROM students")->fetch_assoc()['count'];
     $total_teachers = $conn->query("SELECT COUNT(*) as count FROM users WHERE role = 'teacher'")->fetch_assoc()['count'];
@@ -60,6 +60,14 @@ if ($is_teacher && $teacher_class) {
     $total_records = $conn->query("SELECT COUNT(*) as count FROM grades")->fetch_assoc()['count'];
     // SF10 records are stored in schools_attended
     $total_sf10 = $conn->query("SELECT COUNT(*) as count FROM schools_attended")->fetch_assoc()['count'];
+} else {
+    // Unassigned teacher
+    $total_students = 0;
+    $total_teachers = 0;
+    $total_classes = 0;
+    $total_subjects = 0;
+    $total_records = 0;
+    $total_sf10 = 0;
 }
 
 // Get students by grade level
@@ -80,7 +88,7 @@ if ($is_teacher && $teacher_class) {
     $stmt->bind_param("issii", $grade_level, $section, $current_school_year, $user['id'], $school_year_id);
     $stmt->execute();
     $subject_stats = $stmt->get_result();
-} else {
+} elseif ($is_admin) {
     // For admin, show grade level distribution
     for ($i = 1; $i <= 6; $i++) {
         $result = $conn->query("SELECT COUNT(DISTINCT sa.student_id) as count 
@@ -96,6 +104,7 @@ if ($is_teacher && $teacher_class) {
         $grade_stats[$i] = ['count' => $count, 'percentage' => $percentage];
     }
 }
+
 
 // Get recent activities based on role
 if ($is_teacher && $teacher_class) {
@@ -127,7 +136,7 @@ if ($is_teacher && $teacher_class) {
     
     $recent_sf10 = null;
     $recent_class = null;
-} else {
+} elseif ($is_admin) {
     // Admin recent activities
     $recent_students = $conn->query("SELECT CONCAT(first_name, ' ', last_name) as name, created_at FROM students ORDER BY created_at DESC LIMIT 1")->fetch_assoc();
     
@@ -147,7 +156,14 @@ if ($is_teacher && $teacher_class) {
                                   FROM schools_attended 
                                   WHERE grade_level IS NOT NULL 
                                   ORDER BY created_at DESC LIMIT 1")->fetch_assoc();
+} else {
+    // Unassigned teacher - no recent activities
+    $recent_students = null;
+    $recent_grades = null;
+    $recent_sf10 = null;
+    $recent_class = null;
 }
+
 
 function timeAgo($datetime) {
     if (!$datetime) return 'N/A';
@@ -185,6 +201,106 @@ function timeAgo($datetime) {
 }
 ?>
 
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+/**
+ * Shared initialization function for dashboard doughnut charts
+ */
+function initChart(labels, dataPoints, percents, totalStudents, colors) {
+    const labelsArr = labels.length > 0 ? labels : ['No data'];
+    const dataArr = dataPoints.length > 0 && totalStudents > 0 ? dataPoints : [1];
+    const colorsArr = totalStudents > 0 ? colors : ['#6c757d'];
+    const displayTotal = totalStudents || 0;
+
+    const ctx = document.getElementById('gradeDistributionChart').getContext('2d');
+    
+    const centerTextPlugin = {
+        id: 'centerTextPlugin',
+        afterDraw(chart) {
+            const {ctx, chartArea: {left, right, top, bottom, width, height}} = chart;
+            ctx.save();
+            let centerTextColor = '#ffffff';
+            try { if (!document.body.classList.contains('dark-theme')) centerTextColor = '#111827'; } catch(e){}
+            ctx.fillStyle = centerTextColor;
+            ctx.font = '700 22px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(String(displayTotal), left + width/2, top + height/2 - 6);
+            ctx.font = '600 12px Arial';
+            ctx.fillText('students', left + width/2, top + height/2 + 16);
+            ctx.restore();
+        }
+    };
+
+    function getOrCreateTooltip(chart) {
+        let el = document.getElementById('chartjs-tooltip');
+        if (!el) {
+            el = document.createElement('div'); el.id = 'chartjs-tooltip';
+            el.style.position = 'absolute'; el.style.zIndex = 99999; el.style.pointerEvents = 'none';
+            el.style.background = '#111827'; el.style.color = '#fff'; el.style.padding = '8px 10px';
+            el.style.borderRadius = '6px'; el.style.boxShadow = '0 6px 18px rgba(0,0,0,0.4)'; el.style.font = '600 12px Arial';
+            document.body.appendChild(el);
+        }
+        return el;
+    }
+
+    function externalTooltip(context) {
+        const {chart, tooltip} = context;
+        const tooltipEl = getOrCreateTooltip(chart);
+        if (tooltip.opacity === 0) { tooltipEl.style.display = 'none'; return; }
+        const dp = (tooltip.dataPoints && tooltip.dataPoints[0]) || null;
+        const rawValue = dp ? (dp.parsed || dp.raw || 0) : 0;
+        const total = chart.data.datasets[0].data.reduce((a,b)=>a+b,0) || 1;
+        const pct = Math.round((rawValue / total) * 100);
+        const color = (dp && chart.data.datasets[0].backgroundColor && chart.data.datasets[0].backgroundColor[dp.dataIndex]) || '#999';
+        const labelText = (dp && dp.label) || '';
+        let innerHtml = `<div style="font-weight:700;margin-bottom:6px;">${labelText}</div>`;
+        innerHtml += `<div style="display:flex; align-items:center; gap:8px;"><div style="width:12px; height:12px; background:${color}; border-radius:2px;"></div><div>${rawValue} students (${pct}%)</div></div>`;
+        tooltipEl.innerHTML = innerHtml; tooltipEl.style.display = 'block';
+        const canvasRect = chart.canvas.getBoundingClientRect();
+        tooltipEl.style.left = window.pageXOffset + canvasRect.left + tooltip.caretX + 12 + 'px';
+        tooltipEl.style.top = window.pageYOffset + canvasRect.top + tooltip.caretY - 8 + 'px';
+    }
+
+    Chart.register(centerTextPlugin);
+    const chart = new Chart(ctx, {
+        type: 'doughnut',
+        data: { labels: labelsArr, datasets: [{ data: dataArr, backgroundColor: colorsArr, hoverOffset: 6, borderWidth: 2, borderColor: '#111827' }] },
+        options: { responsive: true, cutout: '64%', maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { enabled: false, external: externalTooltip } } }
+    });
+
+    // Theme Observer: Automatically update chart when dark mode is toggled
+    window.__chartInstances = window.__chartInstances || [];
+    window.__chartInstances.push(chart);
+    if (!window.__themeObserver) {
+        window.__themeObserver = new MutationObserver(function(mutations) {
+            mutations.forEach(function(mutation) {
+                if (mutation.attributeName === 'class') {
+                    window.__chartInstances.forEach(c => c.update());
+                }
+            });
+        });
+        window.__themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+    }
+
+    const legendContainer = document.getElementById('gradeDistributionLegend');
+    if (legendContainer && totalStudents > 0) {
+        legendContainer.innerHTML = labels.map((label, idx) => `
+            <div style="display:flex; align-items:center; justify-content:space-between;">
+                <div style="display:flex; align-items:center; gap:10px;">
+                    <div style="width:16px; height:16px; background:${colors[idx]}; border-radius:4px;"></div>
+                    <div style="font-weight:700; color: var(--legend-text-color);">${label}</div>
+                </div>
+                <div style="text-align:right;">
+                    <div style="font-weight:700; color:var(--legend-text-color);">${percents[idx]}%</div>
+                    <div style="font-size:12px; color:var(--legend-muted-color);">${dataPoints[idx]} students</div>
+                </div>
+            </div>
+        `).join('');
+    }
+}
+</script>
+
 <div class="page-header">
     <?php if ($is_teacher && $teacher_class): ?>
     <h2><i class="bi bi-speedometer2"></i> My Class Dashboard</h2>
@@ -197,7 +313,7 @@ function timeAgo($datetime) {
 
 <!-- Statistics Cards -->
 <div class="row mb-4">
-    <?php if (!$is_teacher): ?>
+    <?php if ($is_admin): ?>
     <div class="col-md-3">
         <div class="stats-card" onclick="window.location.href='students.php'" style="cursor: pointer;">
             <div class="icon">
@@ -278,9 +394,12 @@ function timeAgo($datetime) {
                 <?php if ($is_teacher && $teacher_class): ?>
                 <span><i class="bi bi-bar-chart-fill"></i> Class Distribution by Gender</span>
                 <span class="badge bg-primary">By Gender</span>
-                <?php else: ?>
+                <?php elseif ($is_admin): ?>
                 <span><i class="bi bi-bar-chart-fill"></i> Student Distribution by Grade Level</span>
                 <span class="badge bg-primary">Total: <?= number_format($total_students) ?> Students</span>
+                <?php else: ?>
+                <span><i class="bi bi-bar-chart-fill"></i> System Overview</span>
+                <span class="badge bg-secondary">Unassigned</span>
                 <?php endif; ?>
             </div>
             <div class="card-body" style="padding: 12px 25px;">
@@ -302,337 +421,56 @@ function timeAgo($datetime) {
                             elseif ($g === 'female' || $g === 'f') $gender_counts[1] = $cnt;
                             else $gender_counts[2] += $cnt;
                         }
-                        // Ensure totals reflect all students (including unknown genders)
                         $total = array_sum($gender_counts);
+                        $display_total = $total;
                         if ($total === 0) $total = 1;
                         $gender_percents = array_map(function($c) use ($total){ return round(($c / $total) * 100); }, $gender_counts);
-                        $js_labels = json_encode($gender_labels);
-                        $js_counts = json_encode($gender_counts);
-                        $js_percents = json_encode($gender_percents);
-                        $js_total = json_encode(array_sum($gender_counts));
-                            // Debug: expose computed gender arrays as HTML comment for inspection
-                            echo "<!-- GENDER_DEBUG labels=" . htmlspecialchars($js_labels) . " counts=" . htmlspecialchars($js_counts) . " total=" . htmlspecialchars($js_total) . " -->\n";
                     ?>
                     <div class="chart-row" style="display:flex; gap:12px; align-items:center; padding: 6px 20px 6px 20px;">
                         <div style="flex: 0 0 260px; display:flex; align-items:center; justify-content:center;">
                             <canvas id="gradeDistributionChart" class="dashboard-pie"></canvas>
                         </div>
-                        <div id="gradeDistributionLegend" style="flex:1; display:flex; flex-direction:column; gap:8px;">
-                            <!-- Legend items will be populated by JS -->
-                        </div>
+                        <div id="gradeDistributionLegend" style="flex:1; display:flex; flex-direction:column; gap:8px;"></div>
                     </div>
-                    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
                     <script>
                     (function(){
-                        const labels = <?= $js_labels ?>;
-                        const dataPoints = <?= $js_counts ?>;
-                        const percents = <?= $js_percents ?>;
-                        const totalStudents = <?= $js_total ?>;
+                        const labels = <?= json_encode($gender_labels) ?>;
+                        const dataPoints = <?= json_encode($gender_counts) ?>;
+                        const percents = <?= json_encode($gender_percents) ?>;
+                        const totalStudents = <?= json_encode($display_total) ?>;
                         const colors = ['#3498db', '#ff69b4', '#6c757d'];
-
-                        // If there are zero students, show a single grey slice so the donut is visible
-                        let labelsArr = Array.isArray(labels) ? labels.slice() : labels;
-                        let dataArr = Array.isArray(dataPoints) ? dataPoints.slice() : dataPoints;
-                        let percentsArr = Array.isArray(percents) ? percents.slice() : percents;
-                        let colorsArr = colors.slice();
-                        let displayTotal = totalStudents;
-                        const sumVals = (Array.isArray(dataArr) ? dataArr : []).reduce((a,b)=>a+b,0) || 0;
-                        if (displayTotal === 0 || sumVals === 0) {
-                            labelsArr = ['No students'];
-                            dataArr = [1];
-                            percentsArr = [0];
-                            colorsArr = ['#6c757d'];
-                            // keep displayTotal as 0 to show center text correctly
-                        }
-                        const ctx = document.getElementById('gradeDistributionChart').getContext('2d');
-                        const centerTextPlugin = {
-                            id: 'centerTextPlugin',
-                            afterDraw(chart) {
-                                const {ctx, chartArea: {left, right, top, bottom, width, height}} = chart;
-                                ctx.save();
-                                let centerTextColor = '#ffffff';
-                                try { if (!document.body.classList.contains('dark-theme')) centerTextColor = '#111827'; } catch(e){}
-                                ctx.fillStyle = centerTextColor;
-                                ctx.font = '700 22px Arial';
-                                ctx.textAlign = 'center';
-                                ctx.textBaseline = 'middle';
-                                ctx.fillText(String(totalStudents), left + width/2, top + height/2 - 6);
-                                ctx.font = '600 12px Arial';
-                                ctx.fillText('students', left + width/2, top + height/2 + 16);
-                                ctx.restore();
-                            }
-                        };
-                        function getOrCreateTooltip(chart) {
-                            let el = document.getElementById('chartjs-tooltip');
-                            if (!el) {
-                                el = document.createElement('div'); el.id = 'chartjs-tooltip';
-                                el.style.position = 'absolute'; el.style.zIndex = 99999; el.style.pointerEvents = 'none';
-                                el.style.background = '#111827'; el.style.color = '#fff'; el.style.padding = '8px 10px';
-                                el.style.borderRadius = '6px'; el.style.boxShadow = '0 6px 18px rgba(0,0,0,0.4)'; el.style.font = '600 12px Arial';
-                                document.body.appendChild(el);
-                            }
-                            return el;
-                        }
-                        function externalTooltip(context) {
-                            const {chart, tooltip} = context;
-                            const tooltipEl = getOrCreateTooltip(chart);
-                            if (tooltip.opacity === 0) { tooltipEl.style.display = 'none'; return; }
-                            const dp = (tooltip.dataPoints && tooltip.dataPoints[0]) || null;
-                            const title = (tooltip.title && tooltip.title[0]) ? tooltip.title[0] : '';
-                            const rawValue = dp ? (dp.parsed || dp.raw || 0) : 0;
-                            const total = chart.data.datasets[0].data.reduce((a,b)=>a+b,0) || 1;
-                            const pct = Math.round((rawValue / total) * 100);
-                            const color = (dp && chart.data.datasets[0].backgroundColor && chart.data.datasets[0].backgroundColor[dp.dataIndex]) || '#999';
-                            const labelText = title || (dp && dp.label) || '';
-                            const countText = rawValue + ' ' + (rawValue === 1 ? 'student' : 'students');
-                            let innerHtml = ''; if (labelText) innerHtml += '<div style="font-weight:700;margin-bottom:6px;">' + labelText + '</div>';
-                            innerHtml += '<div style="display:flex; align-items:center; gap:8px;">'
-                                      + '<div style="width:12px; height:12px; background:' + color + '; border-radius:2px; box-shadow: 0 1px 0 rgba(0,0,0,0.2);"></div>'
-                                      + '<div style="font-weight:600">' + countText + ' (' + pct + '%)</div>'
-                                      + '</div>';
-                            tooltipEl.innerHTML = innerHtml; tooltipEl.style.display = 'block';
-                            const canvasRect = chart.canvas.getBoundingClientRect(); const elRect = tooltipEl.getBoundingClientRect();
-                            let left = window.pageXOffset + canvasRect.left + (tooltip.caretX || canvasRect.width/2) + 12;
-                            const minLeft = window.pageXOffset + 8; const maxLeft = window.pageXOffset + document.documentElement.clientWidth - elRect.width - 8;
-                            if (left > maxLeft) left = maxLeft; if (left < minLeft) left = minLeft;
-                            let top = window.pageYOffset + canvasRect.top + (tooltip.caretY || canvasRect.height/2) - 8;
-                            const minTop = window.pageYOffset + 8; const maxTop = window.pageYOffset + document.documentElement.clientHeight - elRect.height - 8;
-                            if (top > maxTop) top = maxTop; if (top < minTop) top = minTop;
-                            tooltipEl.style.left = left + 'px'; tooltipEl.style.top = top + 'px';
-                        }
-                        Chart.register(centerTextPlugin);
-                        const chart = new Chart(ctx, { type: 'doughnut', data: { labels: labelsArr, datasets: [{ data: dataArr, backgroundColor: colorsArr, hoverOffset: 6, borderWidth: 2, borderColor: '#111827' }] }, options: { responsive: true, cutout: '64%', maintainAspectRatio: false, layout: { padding: { top: 6, right: 6, bottom: 6, left: 6 } }, plugins: { legend: { display: false }, tooltip: { enabled: false, external: externalTooltip } } } });
-                        // Ensure center text updates when theme toggles: track charts and observe body.class changes
-                        window.__chartInstances = window.__chartInstances || [];
-                        window.__chartInstances.push(chart);
-                        if (!window.__chartThemeObserver) {
-                            window.__chartThemeObserver = new MutationObserver(function(muts){
-                                muts.forEach(function(m){
-                                    if (m.attributeName === 'class') {
-                                        (window.__chartInstances || []).forEach(function(c){ try{ c.update(); }catch(e){} });
-                                    }
-                                });
-                            });
-                            window.__chartThemeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
-                        }
-                        const legendContainer = document.getElementById('gradeDistributionLegend');
-                        const containerHtml = labelsArr.map((label, idx) => {
-                            const color = colorsArr[idx]; const val = dataArr[idx] || 0; const pct = percentsArr[idx] || 0;
-                            return `
-                                <div style="display:flex; align-items:center; justify-content:space-between;">
-                                    <div style="display:flex; align-items:center; gap:10px;">
-                                        <div style="width:16px; height:16px; background:${color}; border-radius:4px; box-shadow: 0 1px 0 rgba(0,0,0,0.2);"></div>
-                                        <div style="font-weight:700; color: var(--legend-text-color);">${label}</div>
-                                    </div>
-                                    <div style="text-align:right;">
-                                        <div style="font-weight:700; color:var(--legend-text-color);">${pct}%</div>
-                                        <div style="font-size:12px; color:var(--legend-muted-color);">${val} students</div>
-                                    </div>
-                                </div>
-                            `;
-                        }).join('');
-                        legendContainer.innerHTML = containerHtml;
+                        
+                        initChart(labels, dataPoints, percents, totalStudents, colors);
                     })();
                     </script>
-                <?php else: ?>
-                    <?php if ($total_students > 0): ?>
-                    <!-- Grade Distribution Donut Chart (Grades 1-6) -->
+                <?php elseif ($is_admin): ?>
+                    <!-- Admin: Grade Level Distribution (1-6) -->
                     <div class="chart-row" style="display:flex; gap:12px; align-items:center; padding: 6px 20px 6px 20px;">
                         <div style="flex: 0 0 260px; display:flex; align-items:center; justify-content:center;">
                             <canvas id="gradeDistributionChart" class="dashboard-pie"></canvas>
                         </div>
-                        <div id="gradeDistributionLegend" style="flex:1; display:flex; flex-direction:column; gap:8px;">
-                            <!-- Legend items will be populated by JS -->
-                        </div>
+                        <div id="gradeDistributionLegend" style="flex:1; display:flex; flex-direction:column; gap:8px;"></div>
                     </div>
                     <?php
-                        $grade_labels = [];
-                        $grade_counts = [];
-                        $total_students = 0;
+                        $grade_labels = []; $grade_counts = [];
                         for ($i = 1; $i <= 6; $i++) {
                             $grade_labels[] = "Grade $i";
-                            $count = (int)($grade_stats[$i]['count'] ?? 0);
-                            $grade_counts[] = $count;
-                            $total_students += $count;
+                            $grade_counts[] = (int)($grade_stats[$i]['count'] ?? 0);
                         }
-                        if ($total_students === 0) $total_students = 1;
-                        $grade_percents = array_map(function($c) use ($total_students){ return round(($c / $total_students) * 100); }, $grade_counts);
-
-                        $js_labels = json_encode($grade_labels);
-                        $js_counts = json_encode($grade_counts);
-                        $js_percents = json_encode($grade_percents);
-                        $real_total = array_sum($grade_counts);
-                        $js_total = json_encode($real_total);
+                        $total = array_sum($grade_counts); 
+                        $display_total = $total;
+                        if ($total === 0) $total = 1;
+                        $grade_percents = array_map(function($c) use ($total){ return round(($c / $total) * 100); }, $grade_counts);
                     ?>
-                    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
                     <script>
                     (function(){
-                        const labels = <?= $js_labels ?>;
-                        const dataPoints = <?= $js_counts ?>;
-                        const percents = <?= $js_percents ?>;
-                        const totalStudents = <?= $js_total ?>;
-
+                        const labels = <?= json_encode($grade_labels) ?>;
+                        const dataPoints = <?= json_encode($grade_counts) ?>;
+                        const percents = <?= json_encode($grade_percents) ?>;
+                        const totalStudents = <?= json_encode($display_total) ?>;
                         const colors = ['#3498db', '#2ecc71', '#f1c40f', '#9b59b6', '#ff69b4', '#ff4d4d'];
-
-                        const ctx = document.getElementById('gradeDistributionChart').getContext('2d');
-
-                        // Center text plugin: shows total number of students
-                        const centerTextPlugin = {
-                            id: 'centerTextPlugin',
-                            afterDraw(chart) {
-                                const {ctx, chartArea: {left, right, top, bottom, width, height}} = chart;
-                                ctx.save();
-                                // Choose text color based on theme (dark-theme class on body)
-                                let centerTextColor = '#ffffff';
-                                try {
-                                    if (!document.body.classList.contains('dark-theme')) {
-                                        centerTextColor = '#111827';
-                                    }
-                                } catch(e) {}
-                                ctx.fillStyle = centerTextColor;
-                                ctx.font = '700 22px Arial';
-                                ctx.textAlign = 'center';
-                                ctx.textBaseline = 'middle';
-                                ctx.fillText(String(totalStudents), left + width/2, top + height/2 - 6);
-                                ctx.font = '600 12px Arial';
-                                ctx.fillText('students', left + width/2, top + height/2 + 16);
-                                ctx.restore();
-                            }
-                        };
-
-                        // External DOM tooltip so it can overlay all page elements
-                        function getOrCreateTooltip(chart) {
-                            let el = document.getElementById('chartjs-tooltip');
-                            if (!el) {
-                                el = document.createElement('div');
-                                el.id = 'chartjs-tooltip';
-                                el.style.position = 'absolute';
-                                el.style.zIndex = 99999;
-                                el.style.pointerEvents = 'none';
-                                el.style.background = '#111827';
-                                el.style.color = '#fff';
-                                el.style.padding = '8px 10px';
-                                el.style.borderRadius = '6px';
-                                el.style.boxShadow = '0 6px 18px rgba(0,0,0,0.4)';
-                                el.style.font = '600 12px Arial';
-                                document.body.appendChild(el);
-                            }
-                            return el;
-                        }
-
-                        function externalTooltip(context) {
-                            const {chart, tooltip} = context;
-                            const tooltipEl = getOrCreateTooltip(chart);
-                            if (tooltip.opacity === 0) {
-                                tooltipEl.style.display = 'none';
-                                return;
-                            }
-
-                            // Prepare content: include title label, color swatch, value and percent
-                            const dp = (tooltip.dataPoints && tooltip.dataPoints[0]) || null;
-                            const title = (tooltip.title && tooltip.title[0]) ? tooltip.title[0] : '';
-                            const rawValue = dp ? (dp.parsed || dp.raw || 0) : 0;
-                            const total = chart.data.datasets[0].data.reduce((a,b)=>a+b,0) || 1;
-                            const pct = Math.round((rawValue / total) * 100);
-                            const color = (dp && chart.data.datasets[0].backgroundColor && chart.data.datasets[0].backgroundColor[dp.dataIndex]) || '#999';
-
-                            const labelText = title || (dp && dp.label) || '';
-                            const countText = rawValue + ' ' + (rawValue === 1 ? 'student' : 'students');
-
-                            let innerHtml = '';
-                            if (labelText) {
-                                innerHtml += '<div style="font-weight:700;margin-bottom:6px;">' + labelText + '</div>';
-                            }
-                            innerHtml += '<div style="display:flex; align-items:center; gap:8px;">'
-                                      + '<div style="width:12px; height:12px; background:' + color + '; border-radius:2px; box-shadow: 0 1px 0 rgba(0,0,0,0.2);"></div>'
-                                      + '<div style="font-weight:600">' + countText + ' (' + pct + '%)</div>'
-                                      + '</div>';
-
-                            tooltipEl.innerHTML = innerHtml;
-                            // Show then measure to avoid overflow off-screen (especially on mobile)
-                            tooltipEl.style.display = 'block';
-                            const canvasRect = chart.canvas.getBoundingClientRect();
-                            const elRect = tooltipEl.getBoundingClientRect();
-
-                            // Preferred position near the caret
-                            let left = window.pageXOffset + canvasRect.left + (tooltip.caretX || canvasRect.width/2) + 12;
-                            const minLeft = window.pageXOffset + 8;
-                            const maxLeft = window.pageXOffset + document.documentElement.clientWidth - elRect.width - 8;
-                            if (left > maxLeft) left = maxLeft;
-                            if (left < minLeft) left = minLeft;
-
-                            let top = window.pageYOffset + canvasRect.top + (tooltip.caretY || canvasRect.height/2) - 8;
-                            const minTop = window.pageYOffset + 8;
-                            const maxTop = window.pageYOffset + document.documentElement.clientHeight - elRect.height - 8;
-                            if (top > maxTop) top = maxTop;
-                            if (top < minTop) top = minTop;
-
-                            tooltipEl.style.left = left + 'px';
-                            tooltipEl.style.top = top + 'px';
-                        }
-
-                        Chart.register(centerTextPlugin);
-
-                        const chart = new Chart(ctx, {
-                            type: 'doughnut',
-                            data: {
-                                labels: labels,
-                                datasets: [{
-                                    data: dataPoints,
-                                    backgroundColor: colors,
-                                    hoverOffset: 6,
-                                    borderWidth: 2,
-                                    borderColor: '#111827'
-                                }]
-                            },
-                            options: {
-                                responsive: true,
-                                cutout: '64%',
-                                maintainAspectRatio: false,
-                                layout: { padding: { top: 6, right: 6, bottom: 6, left: 6 } },
-                                plugins: {
-                                    legend: { display: false },
-                                    tooltip: {
-                                        enabled: false,
-                                        external: externalTooltip
-                                    }
-                                }
-                            }
-                        });
-                        // Ensure center text updates when theme toggles: track charts and observe body.class changes
-                        window.__chartInstances = window.__chartInstances || [];
-                        window.__chartInstances.push(chart);
-                        if (!window.__chartThemeObserver) {
-                            window.__chartThemeObserver = new MutationObserver(function(muts){
-                                muts.forEach(function(m){
-                                    if (m.attributeName === 'class') {
-                                        (window.__chartInstances || []).forEach(function(c){ try{ c.update(); }catch(e){} });
-                                    }
-                                });
-                            });
-                            window.__chartThemeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
-                        }
-
-                        // Build custom legend for grades 1-6
-                        const legendContainer = document.getElementById('gradeDistributionLegend');
-                        const containerHtml = labels.map((label, idx) => {
-                            const color = colors[idx];
-                            const val = dataPoints[idx] || 0;
-                            const pct = percents[idx] || 0;
-                            return `
-                                <div style="display:flex; align-items:center; justify-content:space-between;">
-                                    <div style="display:flex; align-items:center; gap:10px;">
-                                        <div style="width:16px; height:16px; background:${color}; border-radius:4px; box-shadow: 0 1px 0 rgba(0,0,0,0.2);"></div>
-                                        <div style="font-weight:700; color: var(--legend-text-color);">${label}</div>
-                                    </div>
-                                    <div style="text-align:right;">
-                                        <div style="font-weight:700; color:var(--legend-text-color);">${pct}%</div>
-                                        <div style="font-size:12px; color:var(--legend-muted-color);">${val} students</div>
-                                    </div>
-                                </div>
-                            `;
-                        }).join('');
-                        legendContainer.innerHTML = containerHtml;
+                        
+                        initChart(labels, dataPoints, percents, totalStudents, colors);
                     })();
                     </script>
                     
@@ -641,37 +479,39 @@ function timeAgo($datetime) {
                         <?php 
                         $total_count = array_sum(array_column($grade_stats, 'count'));
                         $avg_per_grade = $total_count > 0 ? round($total_count / 6, 1) : 0;
-                        $highest_grade = array_search(max(array_column($grade_stats, 'count')), array_column($grade_stats, 'count')) + 1;
-                        $lowest_grade = array_search(min(array_column($grade_stats, 'count')), array_column($grade_stats, 'count')) + 1;
+                        $highest_grade = 1; $max_val = -1;
+                        foreach($grade_stats as $lvl => $st) { if($st['count'] > $max_val) { $max_val = $st['count']; $highest_grade = $lvl; } }
+                        $lowest_grade = 1; $min_val = 999999;
+                        foreach($grade_stats as $lvl => $st) { if($st['count'] < $min_val) { $min_val = $st['count']; $lowest_grade = $lvl; } }
                         ?>
                         <div class="col-md-4">
-                            <div class="summary-stat-card text-center p-3" style="background: rgba(0,0,0,0.15); border-radius: 12px; border-top: 3px solid #3498db;">
-                                <i class="bi bi-calculator" style="font-size: 24px; color: #3498db;"></i>
-                                <div style="font-size: 10px; color: rgba(255,255,255,0.6); margin-top: 8px; text-transform: uppercase; letter-spacing: 1px;">Average per Grade</div>
-                                <div style="font-size: 24px; font-weight: bold; color: #3498db; margin-top: 5px;"><?= number_format($avg_per_grade, 1) ?></div>
+                            <div class="summary-stat-card text-center p-3" style="background: rgba(0,0,0,0.15); border-radius: 12px; border-top: 3px solid var(--primary-teal);">
+                                <i class="bi bi-calculator" style="font-size: 24px; color: var(--primary-teal);"></i>
+                                <div style="font-size: 10px; color: var(--text-muted); margin-top: 8px; text-transform: uppercase; letter-spacing: 1px;">Average per Grade</div>
+                                <div style="font-size: 24px; font-weight: bold; color: var(--primary-teal); margin-top: 5px;"><?= number_format($avg_per_grade, 1) ?></div>
                             </div>
                         </div>
                         <div class="col-md-4">
                             <div class="summary-stat-card text-center p-3" style="background: rgba(0,0,0,0.15); border-radius: 12px; border-top: 3px solid #2ecc71;">
                                 <i class="bi bi-arrow-up-circle-fill" style="font-size: 24px; color: #2ecc71;"></i>
-                                <div style="font-size: 10px; color: rgba(255,255,255,0.6); margin-top: 8px; text-transform: uppercase; letter-spacing: 1px;">Highest Enrollment</div>
+                                <div style="font-size: 10px; color: var(--text-muted); margin-top: 8px; text-transform: uppercase; letter-spacing: 1px;">Highest Enrollment</div>
                                 <div style="font-size: 24px; font-weight: bold; color: #2ecc71; margin-top: 5px;">Grade <?= $highest_grade ?></div>
                             </div>
                         </div>
                         <div class="col-md-4">
                             <div class="summary-stat-card text-center p-3" style="background: rgba(0,0,0,0.15); border-radius: 12px; border-top: 3px solid #e74c3c;">
                                 <i class="bi bi-arrow-down-circle-fill" style="font-size: 24px; color: #e74c3c;"></i>
-                                <div style="font-size: 10px; color: rgba(255,255,255,0.6); margin-top: 8px; text-transform: uppercase; letter-spacing: 1px;">Lowest Enrollment</div>
+                                <div style="font-size: 10px; color: var(--text-muted); margin-top: 8px; text-transform: uppercase; letter-spacing: 1px;">Lowest Enrollment</div>
                                 <div style="font-size: 24px; font-weight: bold; color: #e74c3c; margin-top: 5px;">Grade <?= $lowest_grade ?></div>
                             </div>
                         </div>
                     </div>
-                    <?php else: ?>
-                    <div class="text-center text-muted py-5">
-                        <i class="bi bi-inbox" style="font-size: 48px; opacity: 0.3;"></i>
-                        <p class="mt-2">No students enrolled yet</p>
+                <?php else: ?>
+                    <div class="text-center py-5">
+                        <i class="bi bi-person-badge text-muted" style="font-size: 48px;"></i>
+                        <h5 class="mt-3 text-muted">Account Not Yet Assigned</h5>
+                        <p class="text-secondary small">Your teacher account is registered but has not been assigned to a class or subject yet.<br>Please contact the system administrator for your assignments.</p>
                     </div>
-                    <?php endif; ?>
                 <?php endif; ?>
             </div>
         </div>
@@ -680,7 +520,7 @@ function timeAgo($datetime) {
     <!-- Recent Activity -->
     <div class="col-md-4">
         <div class="card h-100">
-            <div class="card-header" <?php if (!$is_teacher): ?> onclick="window.location.href='logs.php'" style="cursor: pointer;"<?php endif; ?>>
+            <div class="card-header" <?php if ($is_admin): ?> onclick="window.location.href='logs.php'" style="cursor: pointer;"<?php endif; ?>>
                 <i class="bi bi-clock-history"></i> Recent Activity
             </div>
             <div class="card-body">
@@ -689,10 +529,10 @@ function timeAgo($datetime) {
                 if ($recent_students): 
                     $has_activity = true;
                 ?>
-                <div class="activity-item" <?php if (!$is_teacher): ?> onclick="window.location.href='logs.php'" style="cursor: pointer;"<?php endif; ?>>
+                <div class="activity-item" <?php if ($is_admin): ?> onclick="window.location.href='logs.php'" style="cursor: pointer;"<?php endif; ?>>
                     <div class="d-flex align-items-start mb-3">
                         <div class="flex-shrink-0">
-                            <div style="width: 40px; height: 40px; border-radius: 50%; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); display: flex; align-items: center; justify-content: center;">
+                            <div style="width: 40px; height: 40px; border-radius: 50%; background: linear-gradient(135deg, var(--primary-teal) 0%, var(--primary-teal-light) 100%); display: flex; align-items: center; justify-content: center;">
                                 <i class="bi bi-person-plus-fill text-white"></i>
                             </div>
                         </div>
@@ -710,7 +550,7 @@ function timeAgo($datetime) {
                 <?php if ($recent_grades): 
                     $has_activity = true;
                 ?>
-                <div class="activity-item" <?php if (!$is_teacher): ?> onclick="window.location.href='logs.php'" style="cursor: pointer;"<?php endif; ?>>
+                <div class="activity-item" <?php if ($is_admin): ?> onclick="window.location.href='logs.php'" style="cursor: pointer;"<?php endif; ?>>
                     <div class="d-flex align-items-start mb-3">
                         <div class="flex-shrink-0">
                             <div style="width: 40px; height: 40px; border-radius: 50%; background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); display: flex; align-items: center; justify-content: center;">
@@ -733,10 +573,10 @@ function timeAgo($datetime) {
                 <?php if ($recent_sf10): 
                     $has_activity = true;
                 ?>
-                <div class="activity-item" <?php if (!$is_teacher): ?> onclick="window.location.href='logs.php'" style="cursor: pointer;"<?php endif; ?>>
+                <div class="activity-item" <?php if ($is_admin): ?> onclick="window.location.href='logs.php'" style="cursor: pointer;"<?php endif; ?>>
                     <div class="d-flex align-items-start mb-3">
                         <div class="flex-shrink-0">
-                            <div style="width: 40px; height: 40px; border-radius: 50%; background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); display: flex; align-items: center; justify-content: center;">
+                            <div style="width: 40px; height: 40px; border-radius: 50%; background: linear-gradient(135deg, var(--primary-teal) 0%, var(--primary-teal-light) 100%); display: flex; align-items: center; justify-content: center;">
                                 <i class="bi bi-file-earmark-text-fill text-white"></i>
                             </div>
                         </div>
@@ -756,7 +596,7 @@ function timeAgo($datetime) {
                 <?php if ($recent_class): 
                     $has_activity = true;
                 ?>
-                <div class="activity-item" <?php if (!$is_teacher): ?> onclick="window.location.href='logs.php'" style="cursor: pointer;"<?php endif; ?>>
+                <div class="activity-item" <?php if ($is_admin): ?> onclick="window.location.href='logs.php'" style="cursor: pointer;"<?php endif; ?>>
                     <div class="d-flex align-items-start">
                         <div class="flex-shrink-0">
                             <div style="width: 40px; height: 40px; border-radius: 50%; background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); display: flex; align-items: center; justify-content: center;">
@@ -786,131 +626,25 @@ function timeAgo($datetime) {
 </div>
 
 <style>
-/* Vertical Bar Chart */
-.chart-container {
-    background: rgba(0,0,0,0.1);
-    border-radius: 12px;
-}
-
-.bar-wrapper:hover .bar {
-    opacity: 0.9;
-    transform: scaleY(1.02);
-}
-
-.bar {
-    transition: all 0.8s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-body:not(.dark-theme) .chart-container {
-    background: #f8f9fa;
-}
-
-body:not(.dark-theme) .bar-wrapper div {
-    color: #2c3e50 !important;
-}
-
-body:not(.dark-theme) .bar {
-    box-shadow: 0 2px 8px rgba(0,0,0,0.1) !important;
-}
-
-/* Summary Stat Cards */
-.summary-stat-card {
-    transition: transform 0.3s ease, box-shadow 0.3s ease;
-}
-
-.summary-stat-card:hover {
-    transform: translateY(-3px);
-    box-shadow: 0 8px 20px rgba(0,0,0,0.3);
-}
-
-body:not(.dark-theme) .summary-stat-card {
-    background: #f8f9fa !important;
-    border: 1px solid #e0e0e0;
-}
-
-body:not(.dark-theme) .summary-stat-card div {
-    color: #2c3e50 !important;
-}
-
-body.dark-theme .summary-stat-card {
-    background: rgba(0,0,0,0.15) !important;
-}
-
-/* Dashboard card backgrounds */
-body:not(.dark-theme) .grade-card,
-body:not(.dark-theme) .stat-card {
-    background: #ffffff;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-}
-
-body.dark-theme .grade-card,
-body.dark-theme .stat-card {
+.stats-card {
     background: rgba(255, 255, 255, 0.05);
+    border-radius: 12px;
+    padding: 20px;
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+    border: 1px solid rgba(255, 255, 255, 0.1);
 }
+.stats-card:hover { transform: translateY(-5px); box-shadow: 0 10px 20px rgba(0,0,0,0.2); }
+.stats-card .icon { font-size: 24px; color: var(--primary-teal); margin-bottom: 10px; }
+.stats-card .label { font-size: 14px; color: var(--text-muted); }
+.stats-card .value { font-size: 24px; font-weight: 700; color: var(--text-color); }
 
-/* Progress bar backgrounds */
-body:not(.dark-theme) {
-    --progress-bg: rgba(0, 0, 0, 0.08);
-}
+body:not(.dark-theme) .stats-card { background: #fff; border-color: #e0e0e0; }
 
-body.dark-theme {
-    --progress-bg: rgba(255, 255, 255, 0.15);
-}
+.dashboard-pie { width:220px; height:220px; }
+@media (max-width: 576px) { .chart-row { flex-direction: column; } .dashboard-pie { width:160px; height:160px; } }
 
-/* Chart text colors */
-.chart-label {
-    color: var(--text-color);
-}
-
-.chart-value {
-    color: var(--text-color);
-}
-
-.chart-axis-label {
-    color: var(--text-muted);
-}
-</style>
-
-<style>
-/* Ensure both chart canvases render the same fixed size and are centered */
-</style>
-
-<style>
-/* Responsive dashboard pie sizes */
-.dashboard-pie { display:block; margin:0 auto; width:220px; height:220px; }
-
-@media (max-width: 992px) {
-    .dashboard-pie { width:180px; height:180px; }
-}
-
-@media (max-width: 576px) {
-    .chart-row { flex-direction: column; gap: 12px; }
-    .dashboard-pie { width:140px; height:140px; }
-    #gradeDistributionLegend { width: 100%; display:flex; flex-direction:column; align-items:center; }
-}
-</style>
-</style>
-
-<style>
-/* Legend color variables for light/dark themes */
-body.dark-theme {
-    --legend-text-color: #ffffff;
-    --legend-muted-color: rgba(255,255,255,0.6);
-}
-body:not(.dark-theme) {
-    --legend-text-color: #111827;
-    --legend-muted-color: rgba(0,0,0,0.6);
-}
-</style>
-
-<style>
-/* Allow chart slices to expand outside their immediate container to avoid clipping on hover */
-.chart-row, .chart-row > div {
-    overflow: visible !important;
-}
-.chart-row canvas {
-    display: block;
-}
+body.dark-theme { --legend-text-color: #ffffff; --legend-muted-color: rgba(255,255,255,0.6); }
+body:not(.dark-theme) { --legend-text-color: #111827; --legend-muted-color: rgba(0,0,0,0.6); }
 </style>
 
 <?php include '../templates/footer.php'; ?>

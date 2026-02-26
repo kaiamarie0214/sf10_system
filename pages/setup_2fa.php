@@ -20,6 +20,18 @@ $stmt->execute();
 $result = $stmt->get_result();
 $user = $result->fetch_assoc();
 
+// Sync session with fresh DB data to ensure header matches
+if ($user && isset($_SESSION['user'])) {
+    $_SESSION['user']['totp_secret'] = $user['totp_secret'];
+}
+
+// Handle cancel setup
+if (isset($_GET['cancel'])) {
+    unset($_SESSION['temp_secret']);
+    header("Location: setup_2fa.php");
+    exit();
+}
+
 // If form submitted
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['enable_2fa'])) {
@@ -40,8 +52,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($update_stmt->execute()) {
                 $message = "Two-Factor Authentication enabled successfully!";
                 $msg_type = 'success';
-                // Refresh user data
+                // Refresh user data and session
                 $user['totp_secret'] = $secret;
+                if (isset($_SESSION['user'])) {
+                    $_SESSION['user']['totp_secret'] = $secret;
+                }
                 unset($_SESSION['temp_secret']);
             } else {
                 $message = "Error saving secret: " . $conn->error;
@@ -58,6 +73,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $message = "Two-Factor Authentication disabled.";
             $msg_type = 'warning';
             $user['totp_secret'] = null;
+            if (isset($_SESSION['user'])) {
+                $_SESSION['user']['totp_secret'] = null;
+            }
         }
     }
 }
@@ -78,7 +96,7 @@ include '../templates/header.php';
                 <?php if (!empty($user['totp_secret'])): ?>
                     <span class="badge bg-success rounded-pill px-3">Enabled</span>
                 <?php else: ?>
-                    <span class="badge bg-secondary rounded-pill px-3">Disabled</span>
+                    <span class="badge bg-danger rounded-pill px-3">Disabled</span>
                 <?php endif; ?>
             </div>
             <div class="card-body p-4">
@@ -94,8 +112,8 @@ include '../templates/header.php';
                     <!-- State 1: 2FA Not Enabled -->
                     <div class="text-center py-4">
                         <div class="mb-4">
-                            <span class="d-inline-flex align-items-center justify-content-center bg-light rounded-circle" style="width: 80px; height: 80px;">
-                                <i class="bi bi-shield-check text-primary" style="font-size: 2.5rem;"></i>
+                            <span class="d-inline-flex align-items-center justify-content-center bg-danger-subtle rounded-circle" style="width: 80px; height: 80px;">
+                                <i class="bi bi-shield-exclamation text-danger" style="font-size: 2.5rem;"></i>
                             </span>
                         </div>
                         <h4 class="mb-3">Secure your account</h4>
@@ -103,7 +121,7 @@ include '../templates/header.php';
                             Two-Factor Authentication adds an extra layer of security to your account by requiring a code from your phone in addition to your password.
                         </p>
                         <form method="POST">
-                            <button type="submit" name="enable_2fa" class="btn btn-primary px-4 py-2">
+                            <button type="submit" name="enable_2fa" class="btn btn-primary px-5" style="background-color: #449999; border-color: #449999; height: 48px; border-radius: 12px; font-weight: 700;">
                                 <i class="bi bi-shield-plus me-2"></i>Enable 2FA
                             </button>
                         </form>
@@ -142,10 +160,12 @@ include '../templates/header.php';
                                         <input type="text" name="code" class="form-control form-control-lg text-center font-monospace" placeholder="000000" required pattern="[0-9]{6}" autocomplete="off" maxlength="6" style="letter-spacing: 4px;">
                                     </div>
                                     <div class="d-grid gap-2">
-                                        <button type="submit" name="verify_2fa" class="btn btn-primary">
+                                        <button type="submit" name="verify_2fa" class="btn btn-primary" style="background-color: #449999; border-color: #449999; height: 48px; border-radius: 12px; font-weight: 700;">
                                             Verify & Enable
                                         </button>
-                                        <a href="setup_2fa.php" class="btn btn-outline-secondary">Cancel Setup</a>
+                                    </div>
+                                    <div class="text-center mt-3">
+                                        <a href="setup_2fa.php?cancel=1" class="text-decoration-none text-muted">Cancel Setup</a>
                                     </div>
                                 </form>
                             </div>
@@ -175,7 +195,7 @@ include '../templates/header.php';
                         
                         <div>
                             <form method="POST" onsubmit="return confirm('Are you sure you want to disable 2FA? This will reduce your account security.');">
-                                <button type="submit" name="disable_2fa" class="btn btn-outline-danger">
+                                <button type="submit" name="disable_2fa" class="btn btn-danger">
                                     <i class="bi bi-shield-slash me-2"></i>Disable 2FA
                                 </button>
                             </form>
@@ -185,11 +205,7 @@ include '../templates/header.php';
             </div>
         </div>
         
-        <div class="text-center mt-4">
-            <a href="dashboard.php" class="text-decoration-none text-muted">
-                <i class="bi bi-arrow-left me-1"></i> Back to Dashboard
-            </a>
-        </div>
+
     </div>
 </div>
 

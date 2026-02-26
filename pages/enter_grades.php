@@ -690,8 +690,11 @@ include "../templates/header.php";
 
   <!-- Student Information Card -->
   <div class="card mb-4">
-    <div class="card-header">
+    <div class="card-header d-flex justify-content-between align-items-center">
       <h5 class="mb-0"><i class="bi bi-person-circle"></i> Student Information</h5>
+      <a href="sf10_preview.php?student_id=<?= $student_id ?>" class="btn btn-warning btn-sm text-white" style="border-radius: 8px; font-weight: 700; background-color: #f39c12; border-color: #f39c12;">
+        <i class="bi bi-file-earmark-pdf me-1"></i> View SF10 Preview
+      </a>
     </div>
     <div class="card-body">
       <div class="row">

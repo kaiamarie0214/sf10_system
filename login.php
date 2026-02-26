@@ -9,6 +9,79 @@ if (isset($_SESSION['user'])) {
     exit();
 }
 
+// ── REMEMBER ME check ──────────────────────────────────────────
+if (!isset($_SESSION['user']) && isset($_COOKIE['remember_me'])) {
+    $token = $_COOKIE['remember_me'];
+    $stmt = $conn->prepare("SELECT * FROM users WHERE remember_token = ?");
+    $stmt->bind_param("s", $token);
+    $stmt->execute();
+    $result = $stmt->get_result();
+
+    if ($user = $result->fetch_assoc()) {
+        // Automatically log in the user
+        // We need a school year for full session setup. 
+        // We'll pick the current active one or the most recent one.
+        $active_yr = $conn->query("SELECT * FROM school_years WHERE is_active = 1 LIMIT 1")->fetch_assoc();
+        if (!$active_yr) {
+            $active_yr = $conn->query("SELECT * FROM school_years WHERE status != 'archived' ORDER BY year DESC LIMIT 1")->fetch_assoc();
+        }
+
+        if ($active_yr || ($user['role'] == 'admin')) {
+            $_SESSION['user']              = $user;
+            $_SESSION['user_id']           = $user['id'];
+            $_SESSION['username']          = $user['username'];
+            $_SESSION['role']              = $user['role'];
+            $_SESSION['full_name']         = $user['full_name'];
+            
+            if ($active_yr) {
+                $_SESSION['school_year_id']    = $active_yr['id'];
+                $_SESSION['school_year']       = $active_yr['year'];
+                $_SESSION['school_year_status']= $active_yr['status'];
+            } else {
+                $_SESSION['school_year_id']    = null;
+                $_SESSION['school_year']       = null;
+                $_SESSION['school_year_status']= null;
+            }
+
+            // Setup teacher assignments if applicable
+            if ($user['role'] == 'teacher' && $active_yr) {
+                $stmt = $conn->prepare("
+                    SELECT sta.id, sta.subject_id, s.subject_name, sta.grade_level, sta.section,
+                           CONCAT('Grade ', sta.grade_level, '-', sta.section) as class_display
+                    FROM subject_teacher_assignments sta
+                    JOIN subjects s ON sta.subject_id = s.id
+                    WHERE sta.teacher_id = ? AND sta.school_year_id = ?
+                    ORDER BY sta.grade_level, sta.section, s.subject_name
+                ");
+                $stmt->bind_param("ii", $user['id'], $active_yr['id']);
+                $stmt->execute();
+                $_SESSION['subject_assignments'] = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+
+                $stmt = $conn->prepare("
+                    SELECT cpy.id, cpy.grade_level, cpy.section, cpy.current_count, cpy.capacity,
+                           CONCAT('Grade ', cpy.grade_level, '-', cpy.section) as class_display
+                    FROM classes_per_year cpy
+                    WHERE cpy.adviser_id = ? AND cpy.school_year_id = ? LIMIT 1
+                ");
+                $stmt->bind_param("ii", $user['id'], $active_yr['id']);
+                $stmt->execute();
+                $res_adv = $stmt->get_result();
+                if ($res_adv->num_rows > 0) {
+                    $_SESSION['adviser_class'] = $res_adv->fetch_assoc();
+                    $_SESSION['is_adviser']    = true;
+                } else {
+                    $_SESSION['is_adviser'] = false;
+                }
+            }
+
+            logActivity($conn, $user['id'], 'LOGIN', 'users', $user['id'],
+                "User logged in via Remember Me: {$user['full_name']} ({$user['role']})");
+            header("Location: pages/dashboard.php");
+            exit();
+        }
+    }
+}
+
 // Get available school years (not archived)
 $available_years = $conn->query("
     SELECT id, year, is_active, status, start_date, end_date
@@ -35,6 +108,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     $username       = $_POST['username'];
     $password       = $_POST['password'];
     $school_year_id = $_POST['school_year_id'] ?? null;
+    $remember_me    = isset($_POST['remember_me']);
+
+    // Ensure remember_token column exists
+    $conn->query("ALTER TABLE users ADD COLUMN IF NOT EXISTS remember_token VARCHAR(255) DEFAULT NULL");
 
     $query = $conn->prepare("SELECT * FROM users WHERE username = ?");
     $query->bind_param("s", $username);
@@ -77,6 +154,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     $_SESSION['school_year_id']    = $school_year['id'];
                     $_SESSION['school_year']       = $school_year['year'];
                     $_SESSION['school_year_status']= $school_year['status'];
+
+                    // Handle Remember Me
+                    if ($remember_me) {
+                        $token = bin2hex(random_bytes(32));
+                        $stmt_token = $conn->prepare("UPDATE users SET remember_token = ? WHERE id = ?");
+                        $stmt_token->bind_param("si", $token, $user['id']);
+                        $stmt_token->execute();
+                        setcookie('remember_me', $token, time() + (86400 * 30), "/"); // 30 days
+                    }
 
                     if ($user['role'] == 'teacher') {
                         $stmt = $conn->prepare("
@@ -331,18 +417,26 @@ $start_on_register = ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['act
 
     .overlay-cta {
       margin-top: 26px;
-      padding: 9px 30px;
-      border: 2px solid rgba(255,255,255,0.85);
-      border-radius: 30px;
-      color: white;
-      background: transparent;
-      font-weight: 600;
-      font-size: 14px;
+      height: 48px;
+      padding: 0 35px;
+      border: none;
+      border-radius: 12px;
+      color: #449999;
+      background: white;
+      font-weight: 700;
+      font-size: 15px;
       cursor: pointer;
-      letter-spacing: 0.4px;
-      transition: background 0.25s;
+      transition: all 0.3s;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
-    .overlay-cta:hover { background: rgba(255,255,255,0.2); }
+    .overlay-cta:hover {
+      transform: translateY(-2px);
+      background: #f8fafc;
+      box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+    }
 
     /* ── Form controls ── */
     .form-label {
@@ -435,6 +529,16 @@ $start_on_register = ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['act
       font-size: 13px;
       padding: 12px 14px;
       margin-bottom: 15px;
+    }
+
+    /* ── Custom checkbox color ── */
+    .form-check-input:checked {
+      background-color: #449999;
+      border-color: #449999;
+    }
+    .form-check-input:focus {
+      border-color: #449999;
+      box-shadow: 0 0 0 0.25rem rgba(68, 153, 153, 0.25);
     }
 
     /* mobile logo */
@@ -539,6 +643,12 @@ $start_on_register = ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['act
     html.dark-theme select.form-control option { background-color: #1a202c; color: #ffffff; }
     html.dark-theme .loading-overlay           { background: rgba(26,32,44,0.9); }
     html.dark-theme .auth-footer small         { color: #a0aec0 !important; }
+    html.dark-theme .text-muted                { color: #a0aec0 !important; }
+    html.dark-theme .panel-login span,
+    html.dark-theme .panel-register span       { color: #a0aec0 !important; }
+    html.dark-theme .form-check-label          { color: #a0aec0 !important; }
+    html.dark-theme .form-check-input          { background-color: #1a202c; border-color: #4a5568; }
+    html.dark-theme .form-check-input:checked  { background-color: #449999; border-color: #449999; }
     html.dark-theme .theme-toggle              { color: #FFD700; background: #2d3748; box-shadow: 0 4px 15px rgba(0,0,0,0.4); }
     html.dark-theme .theme-toggle:hover        { background: #1a202c; }
     html.dark-theme .theme-icon-dark           { display: none; }
@@ -612,7 +722,7 @@ $start_on_register = ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['act
             </div>
           </div>
 
-          <div class="mb-2">
+          <div class="mb-3">
             <label class="form-label">Password</label>
             <div class="input-group">
               <span class="input-group-text"><i class="bi bi-lock"></i></span>
@@ -622,9 +732,14 @@ $start_on_register = ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['act
                 <i class="bi bi-eye" id="loginEye"></i>
               </button>
             </div>
-            <div class="text-end mt-1">
-              <a href="forgot_password.php" class="text-decoration-none" style="font-size: 0.85rem; color: #449999;">Forgot Password?</a>
+          </div>
+
+          <div class="mb-3 d-flex align-items-center justify-content-between">
+            <div class="form-check mb-0">
+              <input type="checkbox" name="remember_me" id="rememberMe" class="form-check-input">
+              <label class="form-check-label text-muted" for="rememberMe" style="cursor: pointer; font-size: 0.85rem;">Remember login</label>
             </div>
+            <a href="forgot_password.php" class="text-decoration-none" style="font-size: 0.85rem; color: #449999;">Forgot Password?</a>
           </div>
 
           <button type="submit" class="btn btn-auth" form="loginForm">

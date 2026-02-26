@@ -273,7 +273,7 @@ function loadSchoolSubjects(gradeLevel) {
                                data-grade-level="${gradeLevel}"
                                data-subject-id="${subject.subject_id}"
                                value="${escapeHtml(subject.subject_name)}"
-                               placeholder="Enter display name for this subject"
+                               placeholder=""
                                onkeydown="if(event.key==='Enter'){event.preventDefault();saveSchoolSubjects();}"  >
                     </div>
                 </div>

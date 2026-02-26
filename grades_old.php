@@ -4672,7 +4672,7 @@ function renderSubjectsList(gradeLevel, subjects) {
                                data-grade-level="${gradeLevel}"
                                data-subject-id="${subject.subject_id}"
                                value="${subject.subject_name}"
-                               placeholder="Enter display name for this subject">
+                               placeholder="">
                     </div>
                 </div>
             </div>`;

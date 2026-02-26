@@ -191,6 +191,12 @@ if (!$student) {
     exit();
 }
 
+// Security Check: Ensure teacher has access to this student
+if (!has_teacher_access_to_student($conn, $user['id'], $student_id)) {
+    header('Location: students.php');
+    exit();
+}
+
 // Get all school records for this student
 $stmt = $conn->prepare("SELECT * FROM schools_attended WHERE student_id = ? ORDER BY grade_level ASC");
 $stmt->bind_param("i", $student_id);

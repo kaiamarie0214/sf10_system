@@ -223,8 +223,13 @@ require_once '../templates/header.php';
 </div>
 
 <div class="card mb-4">
-    <div class="card-header">
-        <i class="bi bi-person-badge"></i> Student Information
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span>
+            <i class="bi bi-person-badge"></i> Student Information
+        </span>
+        <a href="edit_student.php?id=<?= $student_id ?>" class="btn btn-sm btn-warning">
+            <i class="bi bi-pencil"></i> Edit Student Info
+        </a>
     </div>
         <div class="card-body">
             <div class="row">

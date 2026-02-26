@@ -35,6 +35,12 @@ if ($student_result->num_rows === 0) {
 
 $student = $student_result->fetch_assoc();
 
+// Security Check: Ensure teacher has access to this student
+if (!has_teacher_access_to_student($conn, $user['id'], $student_id)) {
+    header("Location: students.php");
+    exit;
+}
+
 
 include "../templates/header.php";
 ?>

@@ -37,6 +37,12 @@ if ($student_result->num_rows === 0) {
 
 $student = $student_result->fetch_assoc();
 
+// Security Check: Ensure teacher has access to this student
+if (!has_teacher_access_to_student($conn, $user['id'], $student_id)) {
+    header("Location: students.php");
+    exit;
+}
+
 // Handle Edit Student
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Convert names to uppercase
