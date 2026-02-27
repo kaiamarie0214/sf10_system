@@ -170,6 +170,17 @@ function getAdviserFullName($conn, $school_row) {
 
 // Function to get school details with fallback to adviser's info
 function getSchoolInfo($conn, $school_row) {
+    // If no school record exists for this grade level, return empty fields immediately
+    if (!$school_row) {
+        return [
+            'school_name' => '',
+            'school_id' => '',
+            'district' => '',
+            'division' => '',
+            'region' => ''
+        ];
+    }
+
     $info = [
         'school_name' => $school_row['school_name'] ?? '',
         'school_id' => $school_row['school_id'] ?? '',

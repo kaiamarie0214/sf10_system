@@ -16,6 +16,8 @@ $grade3_school = null;
 $grade4_school = null;
 $grade5_school = null;
 $grade6_school = null;
+$grade7_school = null;
+$grade8_school = null;
 if (isset($_GET['student_id'])) {
    $student_id = intval($_GET['student_id']);
    $stmt = $conn->prepare('SELECT * FROM students WHERE id = ? LIMIT 1');
@@ -46,6 +48,8 @@ if (isset($_GET['student_id'])) {
    $grade4_schools_all = fetch_all_grade_schools($conn, $student_id, 'Grade 4', '4');
    $grade5_schools_all = fetch_all_grade_schools($conn, $student_id, 'Grade 5', '5');
    $grade6_schools_all = fetch_all_grade_schools($conn, $student_id, 'Grade 6', '6');
+   $grade7_schools_all = fetch_all_grade_schools($conn, $student_id, 'Grade 7', '7');
+   $grade8_schools_all = fetch_all_grade_schools($conn, $student_id, 'Grade 8', '8');
 
    // Single-record backward-compat (first record per grade)
    $grade1_school = $grade1_schools_all[0] ?? null;
@@ -54,6 +58,8 @@ if (isset($_GET['student_id'])) {
    $grade4_school = $grade4_schools_all[0] ?? null;
    $grade5_school = $grade5_schools_all[0] ?? null;
    $grade6_school = $grade6_schools_all[0] ?? null;
+   $grade7_school = $grade7_schools_all[0] ?? null;
+   $grade8_school = $grade8_schools_all[0] ?? null;
 
 // Function to get subject name for a specific student, matching preview logic
 function getSubjectNameForStudent($conn, $subject_id, $student_id, $school_attended_id) {
@@ -170,17 +176,28 @@ function getAdviserFullName($conn, $school_row) {
 
 // Function to get school details with fallback to adviser's info
 function getSchoolInfo($conn, $school_row) {
+    // If no school record exists for this grade level, return empty fields immediately
+    if (!$school_row) {
+        return [
+            'school_name' => '',
+            'school_id' => '',
+            'district' => '',
+            'division' => '',
+            'region' => ''
+        ];
+    }
+
     $info = [
-        'school_name' => $school_row['school_name'] ?? '',
-        'school_id' => $school_row['school_id'] ?? '',
-        'district' => $school_row['district'] ?? '',
-        'division' => $school_row['division'] ?? '',
-        'region' => $school_row['region'] ?? ''
+        'school_name' => ($school_row && isset($school_row['school_name'])) ? $school_row['school_name'] : '',
+        'school_id' => ($school_row && isset($school_row['school_id'])) ? $school_row['school_id'] : '',
+        'district' => ($school_row && isset($school_row['district'])) ? $school_row['district'] : '',
+        'division' => ($school_row && isset($school_row['division'])) ? $school_row['division'] : '',
+        'region' => ($school_row && isset($school_row['region'])) ? $school_row['region'] : ''
     ];
 
     // If any critical field is missing, try to fetch from the assigned adviser in the system
     if (empty($info['school_name']) || empty($info['school_id']) || empty($info['district'])) {
-        $adviser_name = $school_row['adviser_name'] ?? '';
+        $adviser_name = ($school_row && isset($school_row['adviser_name'])) ? $school_row['adviser_name'] : '';
         $user_match = null;
 
         // 1. Try matching by name first
@@ -194,9 +211,9 @@ function getSchoolInfo($conn, $school_row) {
 
         // 2. If no match by name, try matching by assignment (for internal records)
         if (!$user_match) {
-            $grade_label = $school_row['grade_level'] ?? '';
-            $section = $school_row['section'] ?? '';
-            $school_year_str = $school_row['school_year'] ?? '';
+            $grade_label = ($school_row && isset($school_row['grade_level'])) ? $school_row['grade_level'] : '';
+            $section = ($school_row && isset($school_row['section'])) ? $school_row['section'] : '';
+            $school_year_str = ($school_row && isset($school_row['school_year'])) ? $school_row['school_year'] : '';
             
             if ($grade_label && $section && $school_year_str) {
                 preg_match('/(\d+)/', $grade_label, $m);
