@@ -30,6 +30,9 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'save_school_subjects') {
         exit;
     }
     
+    // Include logger
+    include_once "../includes/logger.php";
+    
     $updated = 0;
     foreach ($subjects as $subject) {
         $grade_level = intval($subject['grade_level']);
@@ -47,6 +50,12 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'save_school_subjects') {
         if ($stmt->execute()) {
             $updated++;
         }
+    }
+    
+    if ($updated > 0) {
+        // Log the overall activity
+        logActivity($conn, $_SESSION['user']['id'], 'UPDATE', 'subject_grade_groups', null, 
+                    "Updated $updated school subject names across Grade levels 1-6");
     }
     
     echo json_encode([
@@ -247,6 +256,24 @@ document.addEventListener('DOMContentLoaded', function() {
     for (let grade = 1; grade <= 6; grade++) {
         loadSchoolSubjects(grade);
     }
+
+    // Tab persistence logic
+    const activeTab = localStorage.getItem('activeSubjectTab');
+    if (activeTab) {
+        const tabTrigger = document.querySelector(`button[data-bs-target="${activeTab}"]`);
+        if (tabTrigger) {
+            const tab = new bootstrap.Tab(tabTrigger);
+            tab.show();
+        }
+    }
+
+    // Save active tab when changed
+    const tabTriggers = document.querySelectorAll('button[data-bs-toggle="tab"]');
+    tabTriggers.forEach(trigger => {
+        trigger.addEventListener('shown.bs.tab', function (event) {
+            localStorage.setItem('activeSubjectTab', event.target.getAttribute('data-bs-target'));
+        });
+    });
 });
 
 function loadSchoolSubjects(gradeLevel) {
