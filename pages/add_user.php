@@ -193,7 +193,10 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('addUserForm').addEventListener('keydown', function(e) {
         if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') {
             e.preventDefault();
-            this.submit();
+            // Trigger the submit button instead of calling submit() directly
+            // This ensures the button's name/value are included in $_POST
+            const submitBtn = this.querySelector('button[type="submit"]');
+            if (submitBtn) submitBtn.click();
         }
     });
 

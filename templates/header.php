@@ -401,17 +401,22 @@ $needs_setup = $is_admin && empty($_SESSION['school_year_id']);
 
 <!-- Sidebar Navigation -->
 <div class="sidebar">
-  <div class="nav-section">
-    <div style="color: var(--text-muted); font-size: 11px; font-weight: 600; padding: 12px 0 8px; text-transform: uppercase; letter-spacing: 0.5px; text-align: center;">
-      NAVIGATION
-    </div>
+  
+  <!-- Group: MAIN MENU -->
+  <div class="nav-section-title" style="color: var(--text-muted); font-size: 11px; font-weight: 600; padding: 12px 12px 8px; text-transform: uppercase; letter-spacing: 0.5px;">
+    MAIN MENU
   </div>
 
-  <?php if (!$needs_setup): ?>
   <div class="nav-section">
     <a href="dashboard.php" class="nav-link <?= $current_page == 'dashboard' ? 'active' : '' ?>">
       <i class="bi bi-speedometer2"></i> Dashboard
     </a>
+  </div>
+
+  <?php if (!$needs_setup): ?>
+  <!-- Group: ACADEMIC MANAGEMENT -->
+  <div class="nav-section-title" style="color: var(--text-muted); font-size: 11px; font-weight: 600; padding: 12px 12px 8px; text-transform: uppercase; letter-spacing: 0.5px;">
+    ACADEMIC MANAGEMENT
   </div>
 
   <!-- Records Section (All Users) -->
@@ -452,33 +457,6 @@ $needs_setup = $is_admin && empty($_SESSION['school_year_id']);
     <?php endif; ?>
   </div>
 
-  <!-- Manage School Subjects (Admin Only) -->
-  <?php if ($is_admin): ?>
-  <div class="nav-section">
-    <a href="manage_subjects.php" class="nav-link <?= $current_page == 'manage_subjects' ? 'active' : '' ?>">
-      <i class="bi bi-book"></i> School Subjects
-    </a>
-  </div>
-  <?php endif; ?>
-
-  <!-- Manage Quarter Locks (Admin Only) -->
-  <?php if ($is_admin): ?>
-  <div class="nav-section">
-    <a href="manage_quarter_locks.php" class="nav-link <?= $current_page == 'manage_quarter_locks' ? 'active' : '' ?>">
-      <i class="bi bi-lock-fill"></i> Quarter Locks
-    </a>
-  </div>
-  <?php endif; ?>
-
-  <!-- School Years (Admin Only) - placed above Generate SF10 -->
-  <?php if ($is_admin): ?>
-  <div class="nav-section">
-    <a href="school_years.php" class="nav-link <?= $current_page == 'school_years' ? 'active' : '' ?>">
-      <i class="bi bi-calendar3"></i> School Years
-    </a>
-  </div>
-  <?php endif; ?>
-
   <!-- SF10 Generate Section (Admin Only) -->
   <?php if ($is_admin): ?>
   <div class="nav-section">
@@ -486,36 +464,6 @@ $needs_setup = $is_admin && empty($_SESSION['school_year_id']);
       <i class="bi bi-file-earmark-pdf"></i> Generate SF10
     </a>
   </div>
-  <?php endif; ?>
-  <?php endif; ?>
-
-  <!-- User Management Section (Admin Only) - Always visible for admin -->
-  <?php if ($is_admin): ?>
-  <div class="nav-section">
-    <a href="users.php" class="nav-link <?= $current_page == 'users' ? 'active' : '' ?>">
-      <i class="bi bi-person-gear"></i> Users
-    </a>
-  </div>
-  <?php endif; ?>
-
-  <!-- School Year Management (Admin Only) - visible during setup -->
-  <?php if ($is_admin && $needs_setup): ?>
-  <div class="nav-section">
-    <a href="school_years.php" class="nav-link <?= $current_page == 'school_years' ? 'active' : '' ?>">
-      <i class="bi bi-calendar3"></i> School Years
-    </a>
-  </div>
-  <?php endif; ?>
-
-  <?php if (!$needs_setup): ?>
-  <!-- Activity Logs Section (Admin Only) -->
-  <?php if ($is_admin): ?>
-  <div class="nav-section">
-    <a href="logs.php" class="nav-link <?= $current_page == 'logs' ? 'active' : '' ?>">
-      <i class="bi bi-clock-history"></i> Activity Logs
-    </a>
-  </div>
-  <?php endif; ?>
   <?php endif; ?>
 
   <!-- Reports (Admin + Teacher) -->
@@ -525,8 +473,55 @@ $needs_setup = $is_admin && empty($_SESSION['school_year_id']);
     </a>
   </div>
 
-  <!-- Backup / Import-Export (Admin Only) -->
+  <!-- Group: ACADEMIC SETTINGS (Admin Only) -->
   <?php if ($is_admin): ?>
+  <div class="nav-section-title" style="color: var(--text-muted); font-size: 11px; font-weight: 600; padding: 12px 12px 8px; text-transform: uppercase; letter-spacing: 0.5px;">
+    ACADEMIC SETTINGS
+  </div>
+
+  <!-- Manage School Subjects -->
+  <div class="nav-section">
+    <a href="manage_subjects.php" class="nav-link <?= $current_page == 'manage_subjects' ? 'active' : '' ?>">
+      <i class="bi bi-book"></i> School Subjects
+    </a>
+  </div>
+
+  <!-- Manage Quarter Locks -->
+  <div class="nav-section">
+    <a href="manage_quarter_locks.php" class="nav-link <?= $current_page == 'manage_quarter_locks' ? 'active' : '' ?>">
+      <i class="bi bi-lock-fill"></i> Quarter Locks
+    </a>
+  </div>
+
+  <!-- School Years -->
+  <div class="nav-section">
+    <a href="school_years.php" class="nav-link <?= $current_page == 'school_years' ? 'active' : '' ?>">
+      <i class="bi bi-calendar3"></i> School Years
+    </a>
+  </div>
+  <?php endif; ?>
+
+  <!-- Group: SYSTEM ADMINISTRATION -->
+  <div class="nav-section-title" style="color: var(--text-muted); font-size: 11px; font-weight: 600; padding: 12px 12px 8px; text-transform: uppercase; letter-spacing: 0.5px;">
+    SYSTEM ADMINISTRATION
+  </div>
+
+  <!-- User Management Section (Admin Only) -->
+  <?php if ($is_admin): ?>
+  <div class="nav-section">
+    <a href="users.php" class="nav-link <?= $current_page == 'users' ? 'active' : '' ?>">
+      <i class="bi bi-person-gear"></i> Users
+    </a>
+  </div>
+
+  <!-- Activity Logs Section -->
+  <div class="nav-section">
+    <a href="logs.php" class="nav-link <?= $current_page == 'logs' ? 'active' : '' ?>">
+      <i class="bi bi-clock-history"></i> Activity Logs
+    </a>
+  </div>
+
+  <!-- Backup / Import-Export -->
   <div class="nav-section">
     <a href="backup.php" class="nav-link <?= $current_page == 'backup' ? 'active' : '' ?>">
       <i class="bi bi-cloud-arrow-down-fill"></i> Backup / Restore
@@ -534,12 +529,29 @@ $needs_setup = $is_admin && empty($_SESSION['school_year_id']);
   </div>
   <?php endif; ?>
 
-  <!-- Settings / 2FA -->
+  <!-- Settings / 2FA (All Users) -->
   <div class="nav-section">
     <a href="setup_2fa.php" class="nav-link <?= $current_page == 'setup_2fa' ? 'active' : '' ?>">
       <i class="bi bi-shield-lock"></i> Security / 2FA
     </a>
   </div>
+
+  <?php else: ?>
+  <!-- Needs Setup (Admin Only) -->
+  <div class="nav-section-title" style="color: var(--text-muted); font-size: 11px; font-weight: 600; padding: 12px 12px 8px; text-transform: uppercase; letter-spacing: 0.5px;">
+    SYSTEM SETUP
+  </div>
+  <div class="nav-section">
+    <a href="school_years.php" class="nav-link <?= $current_page == 'school_years' ? 'active' : '' ?>">
+      <i class="bi bi-calendar3"></i> School Years
+    </a>
+  </div>
+  <div class="nav-section">
+    <a href="users.php" class="nav-link <?= $current_page == 'users' ? 'active' : '' ?>">
+      <i class="bi bi-person-gear"></i> Users
+    </a>
+  </div>
+  <?php endif; ?>
 
 </div>
 

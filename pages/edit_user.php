@@ -698,16 +698,19 @@ function checkExistingAdviser() {
         });
 }
 
-// Submit form on Enter key from any input/select (except textarea)
-document.getElementById('editUserForm').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') {
-        e.preventDefault();
-        this.submit();
-    }
-});
-
 // Load existing subject assignments on page load
 document.addEventListener('DOMContentLoaded', function() {
+    // Submit form on Enter key from any input/select (except textarea)
+    document.getElementById('editUserForm').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') {
+            e.preventDefault();
+            // Trigger the submit button instead of calling submit() directly
+            // This ensures the button's name/value are included in $_POST
+            const submitBtn = this.querySelector('button[type="submit"]');
+            if (submitBtn) submitBtn.click();
+        }
+    });
+
     if (existingSubjectAssignments && existingSubjectAssignments.length > 0) {
         existingSubjectAssignments.forEach(assignment => {
             addSubjectRow(assignment);
