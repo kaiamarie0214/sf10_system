@@ -551,6 +551,16 @@ $needs_setup = $is_admin && empty($_SESSION['school_year_id']);
       <i class="bi bi-person-gear"></i> Users
     </a>
   </div>
+  <div class="nav-section">
+    <a href="backup.php" class="nav-link <?= $current_page == 'backup' ? 'active' : '' ?>">
+      <i class="bi bi-cloud-arrow-down-fill"></i> Backup / Restore
+    </a>
+  </div>
+  <div class="nav-section">
+    <a href="setup_2fa.php" class="nav-link <?= $current_page == 'setup_2fa' ? 'active' : '' ?>">
+      <i class="bi bi-shield-lock"></i> Security / 2FA
+    </a>
+  </div>
   <?php endif; ?>
 
 </div>

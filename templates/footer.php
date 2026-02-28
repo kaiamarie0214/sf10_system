@@ -1,7 +1,7 @@
   </div><!-- End main-wrapper -->
 
   <footer class="text-center py-3 small text-muted">
-    <span>&copy; <?= date("Y") ?> SF10 Learner Record Management System | v1.6.0</span>
+    <span>&copy; <?= date("Y") ?> SF10 Learner Record Management System | v1.7.0</span>
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>

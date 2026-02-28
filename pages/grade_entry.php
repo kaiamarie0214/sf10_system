@@ -399,7 +399,7 @@ include "../templates/header.php";
   <div class="card-header d-flex justify-content-between align-items-center">
     <span>
       <i class="bi bi-people"></i> Select Student to Enter Grades
-      <span class="badge bg-secondary ms-2" id="studentCount"><?= number_format($total_students) ?></span>
+      <span class="badge bg-primary ms-2" id="studentCount"><?= number_format($total_students) ?></span>
     </span>
     <div class="d-flex gap-2">
       <select id="sortStudents" class="form-select form-select-sm" style="width: auto;">

@@ -4,6 +4,9 @@ $username = "root";
 $password = "kaia0214";
 $database = "sf10_system";
 
+// Set timezone to Manila
+date_default_timezone_set('Asia/Manila');
+
 $conn = new mysqli($servername, $username, $password, $database);
 if ($conn->connect_error) {
     die("Connection failed: " . $conn->connect_error);
