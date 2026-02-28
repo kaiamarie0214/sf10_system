@@ -485,24 +485,24 @@ function initChart(labels, dataPoints, percents, totalStudents, colors) {
                         foreach($grade_stats as $lvl => $st) { if($st['count'] < $min_val) { $min_val = $st['count']; $lowest_grade = $lvl; } }
                         ?>
                         <div class="col-md-4">
-                            <div class="summary-stat-card text-center p-3" style="background: rgba(0,0,0,0.15); border-radius: 12px; border-top: 3px solid var(--primary-teal);">
-                                <i class="bi bi-calculator" style="font-size: 24px; color: var(--primary-teal);"></i>
-                                <div style="font-size: 10px; color: var(--text-muted); margin-top: 8px; text-transform: uppercase; letter-spacing: 1px;">Average per Grade</div>
-                                <div style="font-size: 24px; font-weight: bold; color: var(--primary-teal); margin-top: 5px;"><?= number_format($avg_per_grade, 1) ?></div>
+                            <div class="summary-stat-card text-center p-3 stat-avg">
+                                <i class="bi bi-calculator"></i>
+                                <div class="stat-label">Average per Grade</div>
+                                <div class="stat-value"><?= number_format($avg_per_grade, 1) ?></div>
                             </div>
                         </div>
                         <div class="col-md-4">
-                            <div class="summary-stat-card text-center p-3" style="background: rgba(0,0,0,0.15); border-radius: 12px; border-top: 3px solid #2ecc71;">
-                                <i class="bi bi-arrow-up-circle-fill" style="font-size: 24px; color: #2ecc71;"></i>
-                                <div style="font-size: 10px; color: var(--text-muted); margin-top: 8px; text-transform: uppercase; letter-spacing: 1px;">Highest Enrollment</div>
-                                <div style="font-size: 24px; font-weight: bold; color: #2ecc71; margin-top: 5px;">Grade <?= $highest_grade ?></div>
+                            <div class="summary-stat-card text-center p-3 stat-highest">
+                                <i class="bi bi-arrow-up-circle-fill"></i>
+                                <div class="stat-label">Highest Enrollment</div>
+                                <div class="stat-value">Grade <?= $highest_grade ?></div>
                             </div>
                         </div>
                         <div class="col-md-4">
-                            <div class="summary-stat-card text-center p-3" style="background: rgba(0,0,0,0.15); border-radius: 12px; border-top: 3px solid #e74c3c;">
-                                <i class="bi bi-arrow-down-circle-fill" style="font-size: 24px; color: #e74c3c;"></i>
-                                <div style="font-size: 10px; color: var(--text-muted); margin-top: 8px; text-transform: uppercase; letter-spacing: 1px;">Lowest Enrollment</div>
-                                <div style="font-size: 24px; font-weight: bold; color: #e74c3c; margin-top: 5px;">Grade <?= $lowest_grade ?></div>
+                            <div class="summary-stat-card text-center p-3 stat-lowest">
+                                <i class="bi bi-arrow-down-circle-fill"></i>
+                                <div class="stat-label">Lowest Enrollment</div>
+                                <div class="stat-value">Grade <?= $lowest_grade ?></div>
                             </div>
                         </div>
                     </div>
@@ -639,6 +639,72 @@ function initChart(labels, dataPoints, percents, totalStudents, colors) {
 .stats-card .value { font-size: 24px; font-weight: 700; color: var(--text-color); }
 
 body:not(.dark-theme) .stats-card { background: #fff; border-color: #e0e0e0; }
+
+/* Summary Stat Cards */
+.summary-stat-card {
+    border-radius: 12px;
+    transition: all 0.3s ease;
+    border: 1px solid transparent;
+}
+
+.summary-stat-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 8px 15px rgba(0,0,0,0.15);
+}
+
+.summary-stat-card i {
+    font-size: 24px;
+    margin-bottom: 8px;
+    display: block;
+}
+
+.summary-stat-card .stat-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 4px;
+}
+
+.summary-stat-card .stat-value {
+    font-size: 24px;
+    font-weight: 700;
+}
+
+/* Light Mode Summary Stat Colors */
+body:not(.dark-theme) .summary-stat-card {
+    background: #ffffff;
+    border-color: #e9ecef;
+}
+
+body:not(.dark-theme) .stat-avg { border-top: 3px solid var(--primary-teal); }
+body:not(.dark-theme) .stat-avg i, body:not(.dark-theme) .stat-avg .stat-value { color: var(--primary-teal); }
+body:not(.dark-theme) .stat-avg .stat-label { color: #6c757d; }
+
+body:not(.dark-theme) .stat-highest { border-top: 3px solid #2ecc71; }
+body:not(.dark-theme) .stat-highest i, body:not(.dark-theme) .stat-highest .stat-value { color: #2ecc71; }
+body:not(.dark-theme) .stat-highest .stat-label { color: #6c757d; }
+
+body:not(.dark-theme) .stat-lowest { border-top: 3px solid #e74c3c; }
+body:not(.dark-theme) .stat-lowest i, body:not(.dark-theme) .stat-lowest .stat-value { color: #e74c3c; }
+body:not(.dark-theme) .stat-lowest .stat-label { color: #6c757d; }
+
+/* Dark Mode Summary Stat Colors */
+body.dark-theme .summary-stat-card {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.1);
+}
+
+body.dark-theme .stat-avg { border-top: 3px solid var(--primary-teal); }
+body.dark-theme .stat-avg i, body.dark-theme .stat-avg .stat-value { color: var(--primary-teal); }
+body.dark-theme .stat-avg .stat-label { color: rgba(255, 255, 255, 0.6); }
+
+body.dark-theme .stat-highest { border-top: 3px solid #2ecc71; }
+body.dark-theme .stat-highest i, body.dark-theme .stat-highest .stat-value { color: #2ecc71; }
+body.dark-theme .stat-highest .stat-label { color: rgba(255, 255, 255, 0.6); }
+
+body.dark-theme .stat-lowest { border-top: 3px solid #e74c3c; }
+body.dark-theme .stat-lowest i, body.dark-theme .stat-lowest .stat-value { color: #e74c3c; }
+body.dark-theme .stat-lowest .stat-label { color: rgba(255, 255, 255, 0.6); }
 
 .dashboard-pie { width:220px; height:220px; }
 @media (max-width: 576px) { .chart-row { flex-direction: column; } .dashboard-pie { width:160px; height:160px; } }
