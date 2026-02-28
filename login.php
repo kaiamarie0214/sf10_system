@@ -120,6 +120,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
     if ($user = $result->fetch_assoc()) {
         if (password_verify($password, $user['password'])) {
+            // Check if 2FA is required for this user
+            if (!empty($user['totp_secret']) && $user['2fa_on_login'] == 1) {
+                // Store user info temporarily and redirect to 2FA verification
+                $_SESSION['temp_2fa_user'] = $user;
+                $_SESSION['temp_2fa_school_year_id'] = $school_year_id;
+                $_SESSION['temp_2fa_remember_me'] = $remember_me;
+                header("Location: verify_login_2fa.php");
+                exit();
+            }
+
             if ($user['role'] == 'admin' && empty($available_years)) {
                 $_SESSION['user']              = $user;
                 $_SESSION['user_id']           = $user['id'];
@@ -876,7 +886,7 @@ $start_on_register = ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['act
 </div><!-- /.auth-container -->
 
 <div class="auth-footer">
-  <small>&copy; <?= date('Y') ?> SF10 System. All rights reserved.</small>
+  <small>&copy; <?= date('Y') ?> SF10 System | v1.6.0. All rights reserved.</small>
 </div>
 
 <script>

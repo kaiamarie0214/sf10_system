@@ -13,8 +13,14 @@ $user_id = $_SESSION['user_id'];
 $message = '';
 $msg_type = ''; // 'success', 'danger', 'info', 'warning'
 
+// Check if 2fa_on_login column exists, if not create it (Simple migration fallback)
+$check = $conn->query("SHOW COLUMNS FROM users LIKE '2fa_on_login'");
+if ($check->num_rows == 0) {
+    $conn->query("ALTER TABLE users ADD COLUMN `2fa_on_login` TINYINT(1) DEFAULT 0 AFTER `totp_secret`") or die($conn->error);
+}
+
 // Fetch current user details
-$stmt = $conn->prepare("SELECT username, totp_secret FROM users WHERE id = ?");
+$stmt = $conn->prepare("SELECT username, totp_secret, `2fa_on_login` FROM users WHERE id = ?");
 $stmt->bind_param("i", $user_id);
 $stmt->execute();
 $result = $stmt->get_result();
@@ -23,6 +29,22 @@ $user = $result->fetch_assoc();
 // Sync session with fresh DB data to ensure header matches
 if ($user && isset($_SESSION['user'])) {
     $_SESSION['user']['totp_secret'] = $user['totp_secret'];
+    $_SESSION['user']['2fa_on_login'] = $user['2fa_on_login'];
+}
+
+// Handle toggle 2FA on Login
+if (isset($_POST['toggle_2fa_login'])) {
+    $new_val = isset($_POST['2fa_on_login_toggle']) ? 1 : 0;
+    $update_stmt = $conn->prepare("UPDATE users SET `2fa_on_login` = ? WHERE id = ?");
+    $update_stmt->bind_param("ii", $new_val, $user_id);
+    if ($update_stmt->execute()) {
+        $message = "Login verification preference updated!";
+        $msg_type = 'success';
+        $user['2fa_on_login'] = $new_val;
+        if (isset($_SESSION['user'])) {
+            $_SESSION['user']['2fa_on_login'] = $new_val;
+        }
+    }
 }
 
 // Handle cancel setup
@@ -198,6 +220,23 @@ include '../templates/header.php';
                                 <button type="submit" name="disable_2fa" class="btn btn-danger">
                                     <i class="bi bi-shield-slash me-2"></i>Disable 2FA
                                 </button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <hr class="my-4">
+
+                    <div class="row align-items-center">
+                        <div class="col-md-8">
+                            <h5 class="mb-1"><i class="bi bi-box-arrow-in-right me-2"></i>Require 2FA on Login</h5>
+                            <p class="text-muted small mb-0">When enabled, you will be asked for an authenticator code every time you log in.</p>
+                        </div>
+                        <div class="col-md-4 text-md-end mt-3 mt-md-0">
+                            <form method="POST">
+                                <div class="form-check form-switch d-inline-block">
+                                    <input class="form-check-input" type="checkbox" name="2fa_on_login_toggle" id="2faOnLoginToggle" style="width: 3.5em; height: 1.75em;" onchange="this.form.submit()" <?php echo ($user['2fa_on_login'] ? 'checked' : ''); ?>>
+                                    <input type="hidden" name="toggle_2fa_login" value="1">
+                                </div>
                             </form>
                         </div>
                     </div>

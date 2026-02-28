@@ -6,6 +6,14 @@ $user = $_SESSION['user'];
 $is_teacher = ($user['role'] === 'teacher');
 $is_admin = ($user['role'] === 'admin');
 
+// Check if 2FA is enabled for current user
+$user_id = $user['id'];
+$check_2fa = $conn->prepare("SELECT totp_secret FROM users WHERE id = ?");
+$check_2fa->bind_param("i", $user_id);
+$check_2fa->execute();
+$user_db_data = $check_2fa->get_result()->fetch_assoc();
+$is_2fa_enabled = !empty($user_db_data['totp_secret']);
+
 // Get teacher's class info if teacher
 $teacher_class = null;
 $current_school_year = $_SESSION['school_year'] ?? (date('Y') . '-' . (date('Y') + 1));
@@ -310,6 +318,24 @@ function initChart(labels, dataPoints, percents, totalStudents, colors) {
     <p class="subtitle">School Academic Records Management System</p>
     <?php endif; ?>
 </div>
+
+<!-- 2FA Reminder Alert -->
+<?php if (!$is_2fa_enabled): ?>
+<div class="alert alert-warning border-start border-4 border-warning shadow-sm mb-4 d-flex align-items-center" role="alert">
+    <div class="me-3">
+        <i class="bi bi-shield-lock-fill fs-3 text-warning"></i>
+    </div>
+    <div class="flex-grow-1">
+        <h5 class="alert-heading mb-1">Boost Your Account Security!</h5>
+        <p class="mb-0">Your account is currently only protected by a password. Enable <strong>Two-Factor Authentication (2FA)</strong> to add an extra layer of security.</p>
+    </div>
+    <div class="ms-3">
+        <a href="setup_2fa.php" class="btn btn-warning btn-sm fw-bold">
+            <i class="bi bi-shield-check me-1"></i> Enable 2FA Now
+        </a>
+    </div>
+</div>
+<?php endif; ?>
 
 <!-- Statistics Cards -->
 <div class="row mb-4">
