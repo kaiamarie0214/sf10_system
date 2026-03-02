@@ -220,9 +220,13 @@ if (isset($_POST['edit_user'])) {
                 $stmt_del_all->execute();
             }
             
-            $_SESSION['success_message'] = "User updated successfully!";
-            header("Location: users.php");
-            exit;
+            $success = "User updated successfully!";
+            
+            // Re-fetch user data to show updated values in form
+            $user_query = $conn->prepare("SELECT * FROM users WHERE id = ?");
+            $user_query->bind_param("i", $uid);
+            $user_query->execute();
+            $edit_user = $user_query->get_result()->fetch_assoc();
         } else {
             $error = "Error updating user: " . $stmt->error;
         }
@@ -275,6 +279,13 @@ include "../templates/header.php";
     </a>
 </div>
 
+<?php if (!empty($success)): ?>
+    <div class='alert alert-success alert-dismissible fade show' role='alert' id='successAlert'>
+        <i class="bi bi-check-circle"></i> <?= $success ?>
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+<?php endif; ?>
+
 <?php if (!empty($error)): ?>
     <div class='alert alert-danger alert-dismissible fade show' role='alert' id='errorAlert'>
         <i class="bi bi-exclamation-circle"></i> <?= $error ?>
@@ -285,7 +296,16 @@ include "../templates/header.php";
 <script>
 // Auto-dismiss alerts with fade out
 document.addEventListener('DOMContentLoaded', function() {
+    const successAlert = document.getElementById('successAlert');
     const errorAlert = document.getElementById('errorAlert');
+    
+    if (successAlert) {
+        setTimeout(() => {
+            successAlert.style.transition = 'opacity 0.5s ease-out';
+            successAlert.style.opacity = '0';
+            setTimeout(() => successAlert.remove(), 500);
+        }, 5000);
+    }
     
     if (errorAlert) {
         setTimeout(() => {
@@ -700,14 +720,23 @@ function checkExistingAdviser() {
 
 // Load existing subject assignments on page load
 document.addEventListener('DOMContentLoaded', function() {
-    // Submit form on Enter key from any input/select (except textarea)
-    document.getElementById('editUserForm').addEventListener('keydown', function(e) {
-        if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') {
+    // Submit form on Enter key globally (unless in a textarea)
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+            const activeElement = document.activeElement;
+            // Don't submit if we're in a textarea or if a modal is open (modals usually handle their own Enter)
+            if (activeElement.tagName === 'TEXTAREA' || document.querySelector('.modal.show')) {
+                return;
+            }
+            
             e.preventDefault();
-            // Trigger the submit button instead of calling submit() directly
-            // This ensures the button's name/value are included in $_POST
-            const submitBtn = this.querySelector('button[type="submit"]');
-            if (submitBtn) submitBtn.click();
+            const form = document.getElementById('editUserForm');
+            if (form) {
+                // Trigger the submit button instead of calling submit() directly
+                // This ensures the button's name/value are included in $_POST
+                const submitBtn = form.querySelector('button[type="submit"][name="edit_user"]');
+                if (submitBtn) submitBtn.click();
+            }
         }
     });
 

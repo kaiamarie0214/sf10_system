@@ -250,6 +250,37 @@ if ($has_active) {
 $stmt->execute();
 $class_students = $stmt->get_result();
 
+// --- CHECK FOR SUBJECT ASSIGNMENTS (for modal warning) ---
+$has_subject_assignments = false;
+$assigned_subject_ids = [];
+
+// Get direct subject assignments
+$as_query = "SELECT subject_id FROM teacher_assignments 
+             WHERE teacher_id = ? AND school_year_id = ? 
+             AND grade_level = ? AND section = ? 
+             AND assignment_type = 'subject'";
+$as_stmt = $conn->prepare($as_query);
+$as_stmt->bind_param("iiis", $user['id'], $school_year_id, $grade_level, $section);
+$as_stmt->execute();
+$as_res = $as_stmt->get_result();
+while ($row = $as_res->fetch_assoc()) {
+    $assigned_subject_ids[] = (int)$row['subject_id'];
+}
+
+// Add MAPEH components if teacher is assigned to MAPEH (ID 8)
+if (in_array(8, $assigned_subject_ids)) {
+    $comp_check = $conn->prepare("SELECT subject_id FROM subject_grade_groups WHERE subject_id IN (9,10,11,12) AND grade_level = ? AND subject_name != ''");
+    $comp_check->bind_param("i", $grade_level);
+    $comp_check->execute();
+    $comp_result = $comp_check->get_result();
+    while ($cr = $comp_result->fetch_assoc()) {
+        if (!in_array((int)$cr['subject_id'], $assigned_subject_ids)) {
+            $assigned_subject_ids[] = (int)$cr['subject_id'];
+        }
+    }
+}
+$has_subject_assignments = !empty($assigned_subject_ids);
+
 // Get all students NOT in this grade level for this school year (any section)
 // Also get their current grade level
 if ($has_active) {
@@ -370,9 +401,15 @@ $available_students = $stmt->get_result();
                             <?php endif; ?>
                         </td>
                         <td>
-                            <a href="input_grades_form.php?grade_level=<?= urlencode($grade_level) ?>&section=<?= urlencode($section) ?>&student_id=<?= $student['id'] ?>" class="btn btn-sm btn-primary">
-                                <i class="bi bi-pencil-square"></i> Grades
-                            </a>
+                            <?php if ($has_subject_assignments): ?>
+                                <a href="input_grades_form.php?grade_level=<?= urlencode($grade_level) ?>&section=<?= urlencode($section) ?>&student_id=<?= $student['id'] ?>" class="btn btn-sm btn-primary">
+                                    <i class="bi bi-pencil-square"></i> Grades
+                                </a>
+                            <?php else: ?>
+                                <button type="button" class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#noAssignmentModal">
+                                    <i class="bi bi-pencil-square"></i> Grades
+                                </button>
+                            <?php endif; ?>
                             <button type="button" class="btn btn-sm btn-danger" 
                                     data-bs-toggle="modal" 
                                     data-bs-target="#removeModal"
@@ -391,6 +428,27 @@ $available_students = $stmt->get_result();
             <i class="bi bi-info-circle"></i> No students in your class yet. <a href="add_student_to_class.php">Add students to get started</a>.
         </div>
         <?php endif; ?>
+    </div>
+</div>
+
+<!-- No Assignment Modal -->
+<div class="modal fade" id="noAssignmentModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-danger text-white">
+                <h5 class="modal-title"><i class="bi bi-exclamation-triangle"></i> No Subject Assignments</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>You cannot enter grades for this class yet.</p>
+                <div class="alert alert-warning">
+                    <i class="bi bi-info-circle"></i> You are assigned as the <strong>Adviser</strong>, but you have no <strong>Subject Assignments</strong> for Grade <?= $grade_level ?> - <?= htmlspecialchars($section) ?>. Please contact the administrator.
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
     </div>
 </div>
 
