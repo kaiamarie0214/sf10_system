@@ -501,9 +501,9 @@ $needs_setup = $is_admin && empty($_SESSION['school_year_id']);
   </div>
   <?php endif; ?>
 
-  <!-- Group: SYSTEM ADMINISTRATION -->
+  <!-- Group: SYSTEM ADMINISTRATION / ACCOUNT SECURITY -->
   <div class="nav-section-title" style="color: var(--text-muted); font-size: 11px; font-weight: 600; padding: 12px 12px 8px; text-transform: uppercase; letter-spacing: 0.5px;">
-    SYSTEM ADMINISTRATION
+    <?= $is_admin ? 'SYSTEM ADMINISTRATION' : 'ACCOUNT SECURITY' ?>
   </div>
 
   <!-- User Management Section (Admin Only) -->
