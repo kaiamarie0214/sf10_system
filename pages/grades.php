@@ -1367,32 +1367,45 @@ if ($subjects && $subjects->num_rows > 0) {
 function getSubjectNameForStudent($conn, $subject_id, $student_id, $school_attended_id) {
     // First, determine if this is a transfer student
     $is_transfer = false;
-    $grade_level = null;
+    $grade_level_raw = null;
     
     // Check if is_transfer column exists
     $has_is_transfer = $conn->query("SHOW COLUMNS FROM schools_attended LIKE 'is_transfer'")->num_rows > 0;
     
     if ($has_is_transfer) {
-        $school_info = $conn->query("SELECT grade_level, is_transfer, adviser_name FROM schools_attended WHERE id = $school_attended_id");
+        $school_info = $conn->query("SELECT grade_level, is_transfer FROM schools_attended WHERE id = $school_attended_id");
         if ($school_info && $school_info->num_rows > 0) {
             $school_data = $school_info->fetch_assoc();
-            $grade_level = $school_data['grade_level'];
-            
-            // Use the is_transfer column value from database (more reliable)
-            $is_transfer = !empty($school_data['is_transfer']) ? (bool)$school_data['is_transfer'] : false;
+            $grade_level_raw = $school_data['grade_level'];
+            $is_transfer = intval($school_data['is_transfer'] ?? 0) === 1;
         }
     } else {
         // Fallback: Auto-detect based on adviser (case-insensitive)
         $school_info = $conn->query("SELECT grade_level, adviser_name FROM schools_attended WHERE id = $school_attended_id");
         if ($school_info && $school_info->num_rows > 0) {
             $school_data = $school_info->fetch_assoc();
-            $grade_level = $school_data['grade_level'];
+            $grade_level_raw = $school_data['grade_level'];
             
             if (!empty($school_data['adviser_name'])) {
                 $adviser_check = $conn->query("SELECT id FROM users WHERE LOWER(full_name) = LOWER('" . $conn->real_escape_string($school_data['adviser_name']) . "')")->num_rows;
                 $is_transfer = ($adviser_check == 0); // Transfer if adviser not in system
             } else {
                 $is_transfer = true; // No adviser = transfer student
+            }
+        }
+    }
+
+    // Extract numeric grade level for lookup (e.g., "Grade 1" -> 1, "IV" -> 4)
+    $grade_level_num = null;
+    if ($grade_level_raw) {
+        if (preg_match('/(\d+)/', $grade_level_raw, $m)) {
+            $grade_level_num = intval($m[1]);
+        } else {
+            // Roman numeral fallback for "IV", "V", "VI"
+            $roman_map = ['I' => 1, 'II' => 2, 'III' => 3, 'IV' => 4, 'V' => 5, 'VI' => 6];
+            $clean_grade = strtoupper(trim($grade_level_raw));
+            if (isset($roman_map[$clean_grade])) {
+                $grade_level_num = $roman_map[$clean_grade];
             }
         }
     }
@@ -1410,37 +1423,28 @@ function getSubjectNameForStudent($conn, $subject_id, $student_id, $school_atten
         
         if ($custom_query && $custom_query->num_rows > 0) {
             $custom = $custom_query->fetch_assoc();
+            // Return the custom name (even if empty) to respect user override
             return $custom['custom_subject_name'];
         }
     }
     
     // IMPORTANT: Only use grade-level config for regular students (non-transfer)
-    // Transfer students should NOT be affected by global subject format changes
-    error_log("getSubjectNameForStudent: student_id=$student_id, school_attended_id=$school_attended_id, subject_id=$subject_id, is_transfer=" . ($is_transfer ? 'true' : 'false') . ", grade_level=$grade_level");
-    
-    if (!$is_transfer && $grade_level) {
+    if (!$is_transfer && $grade_level_num) {
         // Check if grade groups table exists
         $table_check = $conn->query("SHOW TABLES LIKE 'subject_grade_groups'");
         
         if ($table_check && $table_check->num_rows > 0) {
             // Get subject name from grade level configuration (regular students only)
-            $sql = "SELECT subject_name FROM subject_grade_groups WHERE grade_level = $grade_level AND subject_id = $subject_id";
-            error_log("getSubjectNameForStudent: Executing query: $sql");
-            
-            $group_query = $conn->query($sql);
-            
+            $group_query = $conn->query("SELECT subject_name 
+                                         FROM subject_grade_groups 
+                                         WHERE grade_level = $grade_level_num 
+                                         AND subject_id = $subject_id");
             if ($group_query && $group_query->num_rows > 0) {
-                $group = $group_query->fetch_assoc();
-                error_log("getSubjectNameForStudent: ✓ Found global subject for grade $grade_level, subject $subject_id: " . $group['subject_name']);
-                return $group['subject_name'];
-            } else {
-                error_log("getSubjectNameForStudent: ✗ No global subject found for grade $grade_level, subject $subject_id (query returned " . ($group_query ? $group_query->num_rows : 'NULL') . " rows)");
+                $group_result = $group_query->fetch_assoc();
+                // Return the alias name (even if empty) to respect grade-level configuration
+                return $group_result['subject_name'];
             }
-        } else {
-            error_log("getSubjectNameForStudent: ✗ subject_grade_groups table does not exist");
         }
-    } else {
-        error_log("getSubjectNameForStudent: ✗ Skipping global subjects (is_transfer=" . ($is_transfer ? 'true' : 'false') . ", grade_level=$grade_level)");
     }
     
     // Fall back to default subject name (both transfer and regular students)

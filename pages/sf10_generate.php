@@ -156,19 +156,27 @@ use PhpOffice\PhpSpreadsheet\Spreadsheet;
 function getSubjectNameForStudent($conn, $subject_id, $student_id, $school_attended_id) {
     // First, determine if this is a transfer student
     $is_transfer = false;
-    $grade_level = null;
+    $grade_level_raw = null;
     
-    $school_info = $conn->query("SELECT grade_level, adviser_name FROM schools_attended WHERE id = $school_attended_id");
+    $school_info = $conn->query("SELECT grade_level, is_transfer FROM schools_attended WHERE id = $school_attended_id");
     if ($school_info && $school_info->num_rows > 0) {
         $school_data = $school_info->fetch_assoc();
-        $grade_level = $school_data['grade_level'];
-        
-        // Auto-detect transfer status based on adviser existence in users table
-        if (!empty($school_data['adviser_name'])) {
-            $adviser_check = $conn->query("SELECT id FROM users WHERE full_name = '" . $conn->real_escape_string($school_data['adviser_name']) . "'")->num_rows;
-            $is_transfer = ($adviser_check == 0); // Transfer if adviser not in system
+        $grade_level_raw = $school_data['grade_level'];
+        $is_transfer = intval($school_data['is_transfer'] ?? 0) === 1;
+    }
+
+    // Extract numeric grade level for lookup (e.g., "Grade 1" -> 1, "IV" -> 4)
+    $grade_level_num = null;
+    if ($grade_level_raw) {
+        if (preg_match('/(\d+)/', $grade_level_raw, $m)) {
+            $grade_level_num = intval($m[1]);
         } else {
-            $is_transfer = true; // No adviser = transfer student
+            // Roman numeral fallback for "IV", "V", "VI"
+            $roman_map = ['I' => 1, 'II' => 2, 'III' => 3, 'IV' => 4, 'V' => 5, 'VI' => 6];
+            $clean_grade = strtoupper(trim($grade_level_raw));
+            if (isset($roman_map[$clean_grade])) {
+                $grade_level_num = $roman_map[$clean_grade];
+            }
         }
     }
     
@@ -182,22 +190,23 @@ function getSubjectNameForStudent($conn, $subject_id, $student_id, $school_atten
                                       AND subject_id = $subject_id");
         if ($custom_query && $custom_query->num_rows > 0) {
             $custom_result = $custom_query->fetch_assoc();
+            // Return the custom name (even if empty) to respect user override
             return $custom_result['custom_subject_name'];
         }
     }
     
     // IMPORTANT: Only use grade-level config for regular students (non-transfer)
-    // Transfer students should NOT be affected by global subject format changes
-    if (!$is_transfer && $grade_level) {
+    if (!$is_transfer && $grade_level_num) {
         $table_check = $conn->query("SHOW TABLES LIKE 'subject_grade_groups'");
         
         if ($table_check && $table_check->num_rows > 0) {
             $group_query = $conn->query("SELECT subject_name 
                                          FROM subject_grade_groups 
-                                         WHERE grade_level = $grade_level 
+                                         WHERE grade_level = $grade_level_num 
                                          AND subject_id = $subject_id");
             if ($group_query && $group_query->num_rows > 0) {
                 $group_result = $group_query->fetch_assoc();
+                // Return the alias name (even if empty) to respect grade-level configuration
                 return $group_result['subject_name'];
             }
         }
@@ -275,7 +284,7 @@ try {
             $grades = $all_grades[$key]['grades'];
             
             // Get all subjects from database in order (same as preview)
-            $subjects_query = $conn->query("SELECT id, subject_name FROM subjects WHERE subject_name != 'General Average' ORDER BY id");
+            $subjects_query = $conn->query("SELECT id, subject_name FROM subjects WHERE subject_name != 'General Average' ORDER BY display_order ASC, id ASC");
             $row = 30; // Start at row 30
             
             while ($subject = $subjects_query->fetch_assoc()) {
@@ -347,41 +356,63 @@ try {
         }
     }
     
-    // RIGHT SIDE (Second record) - starts at row 23
-    if (isset($front_records[1])) {
-        $record = $front_records[1];
-        $sheet->setCellValue('K23', $record['school_name']); // School
-        $sheet->setCellValue('N23', $record['school_id']); // School ID
-        $sheet->setCellValue('K24', $record['district'] ?? ''); // District
-        $sheet->setCellValue('N24', $record['division'] ?? ''); // Division
-        $sheet->setCellValue('K25', $record['grade_level']); // Grade
-        $sheet->setCellValue('N25', $record['section'] ?? ''); // Section
-        $sheet->setCellValue('K26', $record['adviser_name'] ?? ''); // Adviser
-        
-        // Get grades for this record
-        $key = $record['grade_level'] . '_' . $record['school_year'];
-        if (isset($all_grades[$key])) {
-            $grades = $all_grades[$key]['grades'];
+        // BOX 2 - GRADE 2 (Top-Right)
+        if (isset($front_records[1])) {
+            $record = $front_records[1];
+            $sheet->setCellValue('K23', !empty($record['school_name']) ? $record['school_name'] : ($user_school_info['school_name'] ?? '')); // School
+            $sheet->setCellValue('N23', !empty($record['school_id']) ? $record['school_id'] : ($user_school_info['school_id'] ?? '')); // School ID
+            $sheet->setCellValue('K24', !empty($record['district']) ? $record['district'] : ($user_school_info['district'] ?? '')); // District
+            $sheet->setCellValue('N24', !empty($record['division']) ? $record['division'] : ($user_school_info['division'] ?? '')); // Division
+            $sheet->setCellValue('K25', $record['grade_level']); // Grade
+            $sheet->setCellValue('N25', $record['section'] ?? ''); // Section
+            $sheet->setCellValue('K26', $record['adviser_name'] ?? ''); // Adviser
             
-            // Row 29 contains quarter headers (1, 2, 3, 4) - DO NOT OVERWRITE
-            // Start at row 30 to preserve quarter numbers in L29, M29, N29, O29
-            $row = 30;
-            foreach ([1, 2, 3, 4, 5, 6, 7, 8] as $subject_id) {
-                if (isset($grades[$subject_id])) {
-                    $g = $grades[$subject_id];
-                    $sheet->setCellValue('L' . $row, $g['q1'] ?? '');
-                    $sheet->setCellValue('M' . $row, $g['q2'] ?? '');
-                    $sheet->setCellValue('N' . $row, $g['q3'] ?? '');
-                    $sheet->setCellValue('O' . $row, $g['q4'] ?? '');
-                    $sheet->setCellValue('P' . $row, $g['final_rating'] ?? '');
-                    $sheet->setCellValue('Q' . $row, $g['remarks'] ?? '');
+            // Get grades for this grade level
+            $key = $record['grade_level'] . '_' . $record['school_year'];
+            if (isset($all_grades[$key])) {
+                $grades = $all_grades[$key]['grades'];
+                
+                // Get all subjects from database in order (same as preview)
+                $subjects_query = $conn->query("SELECT id, subject_name FROM subjects WHERE subject_name != 'General Average' ORDER BY display_order ASC, id ASC");
+                $row = 30; // Start at row 30
+                
+                while ($subject = $subjects_query->fetch_assoc()) {
+                    $sid = $subject['id'];
+                    $display_name = getSubjectNameForStudent($conn, $sid, $student_id, $record['id']);
+                    
+                    // Write subject name with Arial Narrow font size 11
+                    $sheet->setCellValue('I' . $row, $display_name);
+                    $sheet->getStyle('I' . $row)->getFont()->setName('Arial Narrow')->setSize(11);
+                    
+                    $g = $grades[$sid] ?? null;
+                    if ($g) {
+                        $sheet->setCellValue('L' . $row, ($g['q1'] !== '' && $g['q1'] !== null) ? round($g['q1']) : '');
+                        $sheet->setCellValue('M' . $row, ($g['q2'] !== '' && $g['q2'] !== null) ? round($g['q2']) : '');
+                        $sheet->setCellValue('N' . $row, ($g['q3'] !== '' && $g['q3'] !== null) ? round($g['q3']) : '');
+                        $sheet->setCellValue('O' . $row, ($g['q4'] !== '' && $g['q4'] !== null) ? round($g['q4']) : '');
+                        $sheet->setCellValue('P' . $row, ($g['final_rating'] !== '' && $g['final_rating'] !== null) ? round($g['final_rating']) : '');
+                        $sheet->setCellValue('Q' . $row, ($g['remarks'] !== '' && $g['remarks'] !== null) ? $g['remarks'] : '');
+                    }
+                    
+                    $row++;
+                    if ($row > 44) break;
                 }
-                $row++;
+                
+                // General Average for Box 2
+                $gen_avg = $all_grades[$key]['general_average'] ?? null;
+                if ($gen_avg) {
+                    $sheet->setCellValue('L45', ($gen_avg['q1'] !== '' && $gen_avg['q1'] !== null) ? round($gen_avg['q1']) : '');
+                    $sheet->setCellValue('M45', ($gen_avg['q2'] !== '' && $gen_avg['q2'] !== null) ? round($gen_avg['q2']) : '');
+                    $sheet->setCellValue('N45', ($gen_avg['q3'] !== '' && $gen_avg['q3'] !== null) ? round($gen_avg['q3']) : '');
+                    $sheet->setCellValue('O45', ($gen_avg['q4'] !== '' && $gen_avg['q4'] !== null) ? round($gen_avg['q4']) : '');
+                    $sheet->setCellValue('P45', ($gen_avg['final_rating'] !== '' && $gen_avg['final_rating'] !== null) ? round($gen_avg['final_rating']) : '');
+                    $sheet->setCellValue('Q45', ($gen_avg['remarks'] !== '' && $gen_avg['remarks'] !== null) ? $gen_avg['remarks'] : '');
+                }
             }
         }
     }
     
-    // BACK PAGE (Sheet 2) - Third record
+    // BACK PAGE (Sheet 2) - Box 3 and Box 4
     if (count($spreadsheet->getAllSheets()) > 1) {
         $sheetBack = $spreadsheet->getSheet(1);
         $sheetBack->setTitle('Back');
@@ -392,13 +423,13 @@ try {
         $sheetBack->setCellValue('U9', strtoupper($student['middle_name'] ?? ''));
         $sheetBack->setCellValue('B10', $student['lrn']);
         
-        // LEFT SIDE - Fourth record
+        // BOX 3 - GRADE 3 (Bottom-Left)
         if (isset($back_records[0])) {
             $record = $back_records[0];
-            $sheetBack->setCellValue('B23', $record['school_name']);
-            $sheetBack->setCellValue('E23', $record['school_id']);
-            $sheetBack->setCellValue('B24', $record['district'] ?? '');
-            $sheetBack->setCellValue('E24', $record['division'] ?? '');
+            $sheetBack->setCellValue('B23', !empty($record['school_name']) ? $record['school_name'] : ($user_school_info['school_name'] ?? ''));
+            $sheetBack->setCellValue('E23', !empty($record['school_id']) ? $record['school_id'] : ($user_school_info['school_id'] ?? ''));
+            $sheetBack->setCellValue('B24', !empty($record['district']) ? $record['district'] : ($user_school_info['district'] ?? ''));
+            $sheetBack->setCellValue('E24', !empty($record['division']) ? $record['division'] : ($user_school_info['division'] ?? ''));
             $sheetBack->setCellValue('B25', $record['grade_level']);
             $sheetBack->setCellValue('E25', $record['section'] ?? '');
             $sheetBack->setCellValue('B26', $record['adviser_name'] ?? '');
@@ -406,29 +437,52 @@ try {
             $key = $record['grade_level'] . '_' . $record['school_year'];
             if (isset($all_grades[$key])) {
                 $grades = $all_grades[$key]['grades'];
+                
+                // Get all subjects
+                $subjects_query = $conn->query("SELECT id, subject_name FROM subjects WHERE subject_name != 'General Average' ORDER BY display_order ASC, id ASC");
                 $row = 29;
-                foreach ([1, 2, 3, 4, 5, 6, 7, 8] as $subject_id) {
-                    if (isset($grades[$subject_id])) {
-                        $g = $grades[$subject_id];
-                        $sheetBack->setCellValue('C' . $row, $g['q1'] ?? '');
-                        $sheetBack->setCellValue('D' . $row, $g['q2'] ?? '');
-                        $sheetBack->setCellValue('E' . $row, $g['q3'] ?? '');
-                        $sheetBack->setCellValue('F' . $row, $g['q4'] ?? '');
-                        $sheetBack->setCellValue('G' . $row, $g['final_rating'] ?? '');
-                        $sheetBack->setCellValue('H' . $row, $g['remarks'] ?? '');
+                
+                while ($subject = $subjects_query->fetch_assoc()) {
+                    $sid = $subject['id'];
+                    $display_name = getSubjectNameForStudent($conn, $sid, $student_id, $record['id']);
+                    
+                    $sheetBack->setCellValue('B' . $row, $display_name);
+                    $sheetBack->getStyle('B' . $row)->getFont()->setName('Arial Narrow')->setSize(11);
+                    
+                    $g = $grades[$sid] ?? null;
+                    if ($g) {
+                        $sheetBack->setCellValue('C' . $row, ($g['q1'] !== '' && $g['q1'] !== null) ? round($g['q1']) : '');
+                        $sheetBack->setCellValue('D' . $row, ($g['q2'] !== '' && $g['q2'] !== null) ? round($g['q2']) : '');
+                        $sheetBack->setCellValue('E' . $row, ($g['q3'] !== '' && $g['q3'] !== null) ? round($g['q3']) : '');
+                        $sheetBack->setCellValue('F' . $row, ($g['q4'] !== '' && $g['q4'] !== null) ? round($g['q4']) : '');
+                        $sheetBack->setCellValue('G' . $row, ($g['final_rating'] !== '' && $g['final_rating'] !== null) ? round($g['final_rating']) : '');
+                        $sheetBack->setCellValue('H' . $row, ($g['remarks'] !== '' && $g['remarks'] !== null) ? $g['remarks'] : '');
                     }
+                    
                     $row++;
+                    if ($row > 43) break;
+                }
+                
+                // General Average for Box 3
+                $gen_avg = $all_grades[$key]['general_average'] ?? null;
+                if ($gen_avg) {
+                    $sheetBack->setCellValue('C44', ($gen_avg['q1'] !== '' && $gen_avg['q1'] !== null) ? round($gen_avg['q1']) : '');
+                    $sheetBack->setCellValue('D44', ($gen_avg['q2'] !== '' && $gen_avg['q2'] !== null) ? round($gen_avg['q2']) : '');
+                    $sheetBack->setCellValue('E44', ($gen_avg['q3'] !== '' && $gen_avg['q3'] !== null) ? round($gen_avg['q3']) : '');
+                    $sheetBack->setCellValue('F44', ($gen_avg['q4'] !== '' && $gen_avg['q4'] !== null) ? round($gen_avg['q4']) : '');
+                    $sheetBack->setCellValue('G44', ($gen_avg['final_rating'] !== '' && $gen_avg['final_rating'] !== null) ? round($gen_avg['final_rating']) : '');
+                    $sheetBack->setCellValue('H44', ($gen_avg['remarks'] !== '' && $gen_avg['remarks'] !== null) ? $gen_avg['remarks'] : '');
                 }
             }
         }
         
-        // RIGHT SIDE - Fifth record
+        // BOX 4 - GRADE 4 (Bottom-Right)
         if (isset($back_records[1])) {
             $record = $back_records[1];
-            $sheetBack->setCellValue('K23', $record['school_name']);
-            $sheetBack->setCellValue('N23', $record['school_id']);
-            $sheetBack->setCellValue('K24', $record['district'] ?? '');
-            $sheetBack->setCellValue('N24', $record['division'] ?? '');
+            $sheetBack->setCellValue('K23', !empty($record['school_name']) ? $record['school_name'] : ($user_school_info['school_name'] ?? ''));
+            $sheetBack->setCellValue('N23', !empty($record['school_id']) ? $record['school_id'] : ($user_school_info['school_id'] ?? ''));
+            $sheetBack->setCellValue('K24', !empty($record['district']) ? $record['district'] : ($user_school_info['district'] ?? ''));
+            $sheetBack->setCellValue('N24', !empty($record['division']) ? $record['division'] : ($user_school_info['division'] ?? ''));
             $sheetBack->setCellValue('K25', $record['grade_level']);
             $sheetBack->setCellValue('N25', $record['section'] ?? '');
             $sheetBack->setCellValue('K26', $record['adviser_name'] ?? '');
@@ -436,18 +490,41 @@ try {
             $key = $record['grade_level'] . '_' . $record['school_year'];
             if (isset($all_grades[$key])) {
                 $grades = $all_grades[$key]['grades'];
+                
+                // Get all subjects
+                $subjects_query = $conn->query("SELECT id, subject_name FROM subjects WHERE subject_name != 'General Average' ORDER BY display_order ASC, id ASC");
                 $row = 29;
-                foreach ([1, 2, 3, 4, 5, 6, 7, 8] as $subject_id) {
-                    if (isset($grades[$subject_id])) {
-                        $g = $grades[$subject_id];
-                        $sheetBack->setCellValue('L' . $row, $g['q1'] ?? '');
-                        $sheetBack->setCellValue('M' . $row, $g['q2'] ?? '');
-                        $sheetBack->setCellValue('N' . $row, $g['q3'] ?? '');
-                        $sheetBack->setCellValue('O' . $row, $g['q4'] ?? '');
-                        $sheetBack->setCellValue('P' . $row, $g['final_rating'] ?? '');
-                        $sheetBack->setCellValue('Q' . $row, $g['remarks'] ?? '');
+                
+                while ($subject = $subjects_query->fetch_assoc()) {
+                    $sid = $subject['id'];
+                    $display_name = getSubjectNameForStudent($conn, $sid, $student_id, $record['id']);
+                    
+                    $sheetBack->setCellValue('I' . $row, $display_name);
+                    $sheetBack->getStyle('I' . $row)->getFont()->setName('Arial Narrow')->setSize(11);
+                    
+                    $g = $grades[$sid] ?? null;
+                    if ($g) {
+                        $sheetBack->setCellValue('L' . $row, ($g['q1'] !== '' && $g['q1'] !== null) ? round($g['q1']) : '');
+                        $sheetBack->setCellValue('M' . $row, ($g['q2'] !== '' && $g['q2'] !== null) ? round($g['q2']) : '');
+                        $sheetBack->setCellValue('N' . $row, ($g['q3'] !== '' && $g['q3'] !== null) ? round($g['q3']) : '');
+                        $sheetBack->setCellValue('O' . $row, ($g['q4'] !== '' && $g['q4'] !== null) ? round($g['q4']) : '');
+                        $sheetBack->setCellValue('P' . $row, ($g['final_rating'] !== '' && $g['final_rating'] !== null) ? round($g['final_rating']) : '');
+                        $sheetBack->setCellValue('Q' . $row, ($g['remarks'] !== '' && $g['remarks'] !== null) ? $g['remarks'] : '');
                     }
+                    
                     $row++;
+                    if ($row > 43) break;
+                }
+                
+                // General Average for Box 4
+                $gen_avg = $all_grades[$key]['general_average'] ?? null;
+                if ($gen_avg) {
+                    $sheetBack->setCellValue('L44', ($gen_avg['q1'] !== '' && $gen_avg['q1'] !== null) ? round($gen_avg['q1']) : '');
+                    $sheetBack->setCellValue('M44', ($gen_avg['q2'] !== '' && $gen_avg['q2'] !== null) ? round($gen_avg['q2']) : '');
+                    $sheetBack->setCellValue('N44', ($gen_avg['q3'] !== '' && $gen_avg['q3'] !== null) ? round($gen_avg['q3']) : '');
+                    $sheetBack->setCellValue('O44', ($gen_avg['q4'] !== '' && $gen_avg['q4'] !== null) ? round($gen_avg['q4']) : '');
+                    $sheetBack->setCellValue('P44', ($gen_avg['final_rating'] !== '' && $gen_avg['final_rating'] !== null) ? round($gen_avg['final_rating']) : '');
+                    $sheetBack->setCellValue('Q44', ($gen_avg['remarks'] !== '' && $gen_avg['remarks'] !== null) ? $gen_avg['remarks'] : '');
                 }
             }
         }

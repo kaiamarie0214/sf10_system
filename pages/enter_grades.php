@@ -286,8 +286,8 @@ if (!$school_records) {
     die("Error executing school query: " . $conn->error);
 }
 
-// Get all subjects
-$subjects_query = "SELECT id, subject_name FROM subjects ORDER BY id";
+  // Get all subjects
+$subjects_query = "SELECT id, subject_name, display_order FROM subjects ORDER BY display_order ASC, id ASC";
 $subjects_result = $conn->query($subjects_query);
 $subjects = [];
 while ($row = $subjects_result->fetch_assoc()) {
@@ -461,6 +461,7 @@ include "../templates/header.php";
   body.dark-theme .grades-table .mapeh-q4 {
     border-color: rgba(255, 255, 255, 0.22) !important;
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+    color: #ffffff !important;
   }
   
   .subject-name-col {
@@ -698,21 +699,28 @@ function renderGradesTable(grades, schoolAttendedId, isTransfer = false, selecte
     const regularSubjectName = Object.prototype.hasOwnProperty.call(gradeSubjectNames, String(subject.id))
       ? gradeSubjectNames[String(subject.id)]
       : subject.subject_name;
-    
+
     const isMapeh = subject.subject_name === 'MAPEH';
     const isMapehComponent = mapehComponents.includes(subject.subject_name);
     const isGeneralAverage = subject.subject_name === 'General Average';
     if (isGeneralAverage) hasGeneralAverageRow = true;
 
     // A MAPEH component is "not configured" if subject_grade_groups has it with an empty name
-    // (key exists but value is empty string means admin left it blank in manage_subjects)
+    // IMPORTANT: Transfer students are NEVER "unconfigured" by global settings, but they ARE disabled if they have no custom name set
     const configuredName = gradeSubjectNames[String(subject.id)];
-    const isUnconfiguredMapehComponent = isMapehComponent &&
+    const isUnconfiguredMapehComponent = !isTransfer && isMapehComponent &&
       Object.prototype.hasOwnProperty.call(gradeSubjectNames, String(subject.id)) &&
       configuredName === '';
     
+    // Transfer students' grades are disabled if the custom subject name is explicitly empty
+    const isUnconfiguredTransferSubject = isTransfer && customSubjectName === '';
+    
+    const isDisabled = isUnconfiguredMapehComponent || isUnconfiguredTransferSubject;
+    
     // Add visual class for special computed rows
     const rowClass = isMapeh ? 'mapeh-row' : (isGeneralAverage ? 'general-average-row' : '');
+    
+    const disabledAttr = isDisabled ? `disabled style="background:#e9ecef; cursor:not-allowed;" title="${isTransfer ? 'Enter a subject name to enable grades' : 'Not configured in Manage Subjects'}"` : '';
     
     html += `
       <tr class="${rowClass}" data-subject-id="${subject.id}" data-subject-name="${subject.subject_name}">
@@ -722,8 +730,8 @@ function renderGradesTable(grades, schoolAttendedId, isTransfer = false, selecte
                    name="custom_subject_names[${subject.id}]" 
                    value="${customSubjectName}" 
                    class="form-control form-control-sm"
-                   placeholder="${subject.subject_name}"
-                   style="min-width: 200px;">
+                   style="min-width: 200px;"
+                   oninput="toggleGradeInputs(this, ${subject.id})">
           ` : regularSubjectName}
         </td>`;
     
@@ -755,28 +763,26 @@ function renderGradesTable(grades, schoolAttendedId, isTransfer = false, selecte
       const onInputEvent = isMapehComponent ? 
         `sanitizeGradeInput(this); calculateFinalRating(this, ${subject.id}); calculateMapeh();` : 
         `sanitizeGradeInput(this); calculateFinalRating(this, ${subject.id});`;
-
-      const disabledAttr = isUnconfiguredMapehComponent ? 'disabled style="background:#e9ecef; cursor:not-allowed;" title="Not configured in Manage Subjects"' : '';
       
       html += `
         <td>
           <input type="number" name="grades[${subject.id}][q1]" class="form-control quarter-input" 
-                 min="0" max="100" step="0.01" value="${isUnconfiguredMapehComponent ? '' : q1}" data-quarter="1" data-subject-id="${subject.id}"
+                 min="0" max="100" step="0.01" value="${isDisabled ? '' : q1}" data-quarter="1" data-subject-id="${subject.id}"
                  oninput="${onInputEvent}" ${disabledAttr}>
         </td>
         <td>
           <input type="number" name="grades[${subject.id}][q2]" class="form-control quarter-input" 
-                 min="0" max="100" step="0.01" value="${isUnconfiguredMapehComponent ? '' : q2}" data-quarter="2" data-subject-id="${subject.id}"
+                 min="0" max="100" step="0.01" value="${isDisabled ? '' : q2}" data-quarter="2" data-subject-id="${subject.id}"
                  oninput="${onInputEvent}" ${disabledAttr}>
         </td>
         <td>
           <input type="number" name="grades[${subject.id}][q3]" class="form-control quarter-input" 
-                 min="0" max="100" step="0.01" value="${isUnconfiguredMapehComponent ? '' : q3}" data-quarter="3" data-subject-id="${subject.id}"
+                 min="0" max="100" step="0.01" value="${isDisabled ? '' : q3}" data-quarter="3" data-subject-id="${subject.id}"
                  oninput="${onInputEvent}" ${disabledAttr}>
         </td>
         <td>
           <input type="number" name="grades[${subject.id}][q4]" class="form-control quarter-input" 
-                 min="0" max="100" step="0.01" value="${isUnconfiguredMapehComponent ? '' : q4}" data-quarter="4" data-subject-id="${subject.id}"
+                 min="0" max="100" step="0.01" value="${isDisabled ? '' : q4}" data-quarter="4" data-subject-id="${subject.id}"
                  oninput="${onInputEvent}" ${disabledAttr}>
         </td>`;
     }
@@ -785,14 +791,14 @@ function renderGradesTable(grades, schoolAttendedId, isTransfer = false, selecte
         <td>
           <input type="number" name="grades[${subject.id}][final_rating]" 
                  class="form-control final-rating-${subject.id} ${isGeneralAverage ? 'general-average-final' : ''}" 
-                 value="${isUnconfiguredMapehComponent ? '' : finalRating}" readonly
-                 ${isUnconfiguredMapehComponent ? 'style="background:#e9ecef; cursor:not-allowed;"' : ''}>
+                 value="${isDisabled ? '' : finalRating}" readonly
+                 ${isDisabled ? 'style="background:#e9ecef; cursor:not-allowed;"' : ''}>
         </td>
         <td>
           <input type="text" name="grades[${subject.id}][remarks]" 
                  class="form-control remarks-${subject.id} ${isGeneralAverage ? 'general-average-remarks' : ''}" 
-                 value="${isUnconfiguredMapehComponent ? '' : remarks}" readonly
-                 ${isUnconfiguredMapehComponent ? 'style="background:#e9ecef; cursor:not-allowed;"' : ''}>
+                 value="${isDisabled ? '' : remarks}" readonly
+                 ${isDisabled ? 'style="background:#e9ecef; cursor:not-allowed;"' : ''}>
         </td>
       </tr>
     `;
@@ -899,6 +905,53 @@ function calculateMapeh() {
     if (remarksInput) remarksInput.value = '';
   }
 
+  calculateGeneralAverage();
+}
+
+function toggleGradeInputs(input, subjectId) {
+  const row = input.closest('tr');
+  const gradeInputs = row.querySelectorAll('.quarter-input');
+  const isEmpty = input.value.trim() === '';
+  
+  gradeInputs.forEach(inp => {
+    inp.disabled = isEmpty;
+    if (isEmpty) {
+      inp.value = '';
+      inp.style.background = '#e9ecef';
+      inp.style.cursor = 'not-allowed';
+      inp.title = 'Enter a subject name to enable grades';
+    } else {
+      inp.style.background = '';
+      inp.style.cursor = '';
+      inp.title = '';
+    }
+  });
+
+  // Also handle final rating and remarks
+  const finalRatingInput = row.querySelector(`.final-rating-${subjectId}`);
+  const remarksInput = row.querySelector(`.remarks-${subjectId}`);
+  if (finalRatingInput) {
+    if (isEmpty) {
+      finalRatingInput.value = '';
+      finalRatingInput.style.background = '#e9ecef';
+      finalRatingInput.style.cursor = 'not-allowed';
+    } else {
+      finalRatingInput.style.background = '';
+      finalRatingInput.style.cursor = '';
+    }
+  }
+  if (remarksInput) {
+    if (isEmpty) {
+      remarksInput.value = '';
+      remarksInput.style.background = '#e9ecef';
+      remarksInput.style.cursor = 'not-allowed';
+    } else {
+      remarksInput.style.background = '';
+      remarksInput.style.cursor = '';
+    }
+  }
+
+  calculateMapeh();
   calculateGeneralAverage();
 }
 
