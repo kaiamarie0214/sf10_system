@@ -149,6 +149,14 @@ require_once '../templates/header.php';
 
 // Get available students
 $expected_previous_grade = $grade_level - 1;
+
+// Pagination and Search variables
+$page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+$items_per_page = 20;
+$search = $_GET['search'] ?? '';
+$sort = $_GET['sort'] ?? 'all';
+
+// Fetch all eligible students first to handle pagination in memory (due to complex LEFT JOIN requirements)
 $available_query = "SELECT s.id, s.lrn, s.first_name, s.last_name, s.middle_name, s.gender, s.birthdate,
                     sa_current.grade_level as current_grade,
                     sa_current.section as current_section,
@@ -173,10 +181,53 @@ $available_query = "SELECT s.id, s.lrn, s.first_name, s.last_name, s.middle_name
 $stmt = $conn->prepare($available_query);
 $stmt->bind_param("ississ", $grade_level, $section, $current_school_year, $grade_level, $section, $current_school_year);
 $stmt->execute();
-$available_students = $stmt->get_result();
+$all_students_result = $stmt->get_result();
+
+$students = [];
+while ($student = $all_students_result->fetch_assoc()) {
+    $fullName = strtoupper($student['last_name'] . ', ' . $student['first_name'] . ' ' . ($student['middle_name'] ?? ''));
+    $student['full_name_search'] = strtolower($fullName);
+    $current_grade = $student['current_grade'] ?? 'New';
+    $student['is_eligible'] = ($current_grade == $expected_previous_grade || $current_grade == $grade_level || $current_grade == 'New');
+    $students[] = $student;
+}
+
+// Apply Filters in PHP
+if (!empty($search)) {
+    $search_lower = strtolower(trim($search));
+    $students = array_filter($students, function($s) use ($search_lower) {
+        return strpos($s['full_name_search'], $search_lower) !== false || strpos(strtolower($s['lrn']), $search_lower) !== false;
+    });
+}
+
+if ($sort === 'eligible-only') {
+    $students = array_filter($students, function($s) { return $s['is_eligible']; });
+}
+
+// Apply Sorting
+if ($sort !== 'all' && $sort !== 'eligible-only') {
+    usort($students, function($a, $b) use ($sort) {
+        switch($sort) {
+            case 'name-asc': return $a['full_name_search'] <=> $b['full_name_search'];
+            case 'name-desc': return $b['full_name_search'] <=> $a['full_name_search'];
+            case 'grade-asc': 
+                $ga = $a['current_grade'] == 'New' ? 0 : (int)$a['current_grade'];
+                $gb = $b['current_grade'] == 'New' ? 0 : (int)$b['current_grade'];
+                return $ga <=> $gb;
+        }
+        return 0;
+    });
+}
+
+// Pagination Logic
+$total_items = count($students);
+$total_pages = ceil($total_items / $items_per_page);
+$page = max(1, min($total_pages, $page));
+$offset = ($page - 1) * $items_per_page;
+$students_to_show = array_slice($students, $offset, $items_per_page);
 
 // Debug: Log result count
-error_log("Available students count: " . $available_students->num_rows);
+error_log("Available students count: " . $total_items);
 
 // Handle success/error messages
 $success = $_SESSION['success'] ?? '';
@@ -228,6 +279,19 @@ unset($_SESSION['success'], $_SESSION['error']);
     overflow: hidden;
     padding: 0 !important;
   }
+  .pagination-container {
+    padding: 10px 15px;
+    background: #f8f9fa;
+    border-top: 1px solid #dee2e6;
+    font-size: 13px;
+  }
+  .pagination {
+    margin-bottom: 0;
+  }
+  .page-link {
+    padding: 0.25rem 0.5rem;
+    font-size: 12px;
+  }
   #mainContent .card:last-of-type .table-responsive {
     flex: 1 1 auto;
     min-height: 0;
@@ -251,6 +315,9 @@ unset($_SESSION['success'], $_SESSION['error']);
     z-index: 10;
     background: var(--card-bg, #fff);
   }
+  .student-row:not(.ineligible) {
+    cursor: pointer;
+  }
   .student-row.ineligible {
     opacity: 0.5;
     cursor: not-allowed;
@@ -264,7 +331,7 @@ unset($_SESSION['success'], $_SESSION['error']);
     <div class="page-header mb-0">
         <h2><i class="bi bi-person-plus"></i> Add Student to Class</h2>
         <p class="subtitle">Add students to Grade <?= $grade_level ?> - <?= htmlspecialchars($section) ?> (SY <?= $current_school_year ?>)</p>
-        <small class="text-muted">Debug: Query uses Grade=<?= $grade_level ?>, Section=<?= htmlspecialchars($section) ?>, Year=<?= $current_school_year ?>, Count=<?= $available_students->num_rows ?></small>
+        <small class="text-muted">Debug: Query uses Grade=<?= $grade_level ?>, Section=<?= htmlspecialchars($section) ?>, Year=<?= $current_school_year ?>, Count=<?= $total_items ?></small>
     </div>
     <div>
         <a href="my_class.php" class="btn btn-info">
@@ -300,16 +367,16 @@ unset($_SESSION['success'], $_SESSION['error']);
         </span>
         <div class="d-flex gap-2">
             <select id="sortStudents" class="form-select form-select-sm" style="width: auto;">
-                <option value="all">All Students</option>
-                <option value="name-asc">Name (A-Z)</option>
-                <option value="name-desc">Name (Z-A)</option>
-                <option value="eligible-only">Eligible Only</option>
-                <option value="grade-asc">Grade Level (Low-High)</option>
+                <option value="all" <?= $sort === 'all' ? 'selected' : '' ?>>All Students</option>
+                <option value="name-asc" <?= $sort === 'name-asc' ? 'selected' : '' ?>>Name (A-Z)</option>
+                <option value="name-desc" <?= $sort === 'name-desc' ? 'selected' : '' ?>>Name (Z-A)</option>
+                <option value="eligible-only" <?= $sort === 'eligible-only' ? 'selected' : '' ?>>Eligible Only</option>
+                <option value="grade-asc" <?= $sort === 'grade-asc' ? 'selected' : '' ?>>Grade Level (Low-High)</option>
             </select>
             <div style="position: relative; width: 250px;">
                 <i class="bi bi-search" style="position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: #6c757d; pointer-events: none;"></i>
-                <input type="text" class="form-control form-control-sm" id="studentSearch" placeholder="Search by name or LRN..." style="padding-left: 35px; padding-right: 30px;">
-                <button type="button" id="clearStudentSearch" class="btn btn-sm" style="position: absolute; right: 5px; top: 50%; transform: translateY(-50%); padding: 0; width: 20px; height: 20px; border: none; background: transparent; display: none;">
+                <input type="text" class="form-control form-control-sm" id="studentSearch" placeholder="Search by name or LRN..." value="<?= htmlspecialchars($search) ?>" style="padding-left: 35px; padding-right: 30px;">
+                <button type="button" id="clearStudentSearch" class="btn btn-sm" style="position: absolute; right: 5px; top: 50%; transform: translateY(-50%); padding: 0; width: 20px; height: 20px; border: none; background: transparent; <?= !empty($search) ? 'display: block;' : 'display: none;' ?>">
                     <i class="bi bi-x-circle-fill" style="color: #6c757d;"></i>
                 </button>
             </div>
@@ -332,12 +399,9 @@ unset($_SESSION['success'], $_SESSION['error']);
                     </thead>
                     <tbody>
                         <?php 
-                        $count = 0;
-                        while ($student = $available_students->fetch_assoc()): 
-                            $count++;
+                        foreach ($students_to_show as $student): 
                             $current_grade = $student['current_grade'] ?? 'New';
-                            // Allow students from previous grade, same grade (repeaters), or new students
-                            $is_eligible = ($current_grade == $expected_previous_grade || $current_grade == $grade_level || $current_grade == 'New');
+                            $is_eligible = $student['is_eligible'];
                             $row_class = $is_eligible ? '' : 'ineligible';
                             $fullName = strtoupper($student['last_name'] . ', ' . $student['first_name'] . ' ' . ($student['middle_name'] ?? ''));
                             $pre_is_transfer = !empty($student['is_transfer']) && ($current_grade == $grade_level);
@@ -386,12 +450,13 @@ unset($_SESSION['success'], $_SESSION['error']);
                                 <span class="badge bg-secondary">Not Eligible</span>
                                 <?php endif; ?>
                             </td>
-                        <?php endwhile; ?>
-                        <?php if ($count == 0): ?>
+                        </tr>
+                        <?php endforeach; ?>
+                        <?php if (empty($students_to_show)): ?>
                         <tr>
                             <td colspan="7" class="text-center py-5">
                                 <i class="bi bi-info-circle" style="font-size: 3rem; color: #ccc;"></i>
-                                <p class="text-muted mt-3">No available students. All students are already enrolled in Grade <?= $grade_level ?>.</p>
+                                <p class="text-muted mt-3">No available students found matching your criteria.</p>
                             </td>
                         </tr>
                         <?php endif; ?>
@@ -399,12 +464,40 @@ unset($_SESSION['success'], $_SESSION['error']);
                 </table>
             </form>
         </div>
-        <?php if ($count > 0): ?>
+        <?php if ($total_items > 0): ?>
+        <div class="pagination-container d-flex justify-content-between align-items-center">
+            <div class="text-muted">
+                Showing <?= $offset + 1 ?> to <?= min($offset + $items_per_page, $total_items) ?> of <?= $total_items ?> students
+            </div>
+            <nav aria-label="Page navigation">
+                <ul class="pagination pagination-sm mb-0">
+                    <li class="page-item <?= ($page <= 1) ? 'disabled' : '' ?>">
+                        <a class="page-link" href="?page=<?= $page - 1 ?>&search=<?= urlencode($search) ?>&sort=<?= $sort ?>" aria-label="Previous">
+                            <span aria-hidden="true">&laquo;</span>
+                        </a>
+                    </li>
+                    <?php 
+                    $start_page = max(1, $page - 2);
+                    $end_page = min($total_pages, $page + 2);
+                    for ($i = $start_page; $i <= $end_page; $i++): 
+                    ?>
+                    <li class="page-item <?= ($i == $page) ? 'active' : '' ?>">
+                        <a class="page-link" href="?page=<?= $i ?>&search=<?= urlencode($search) ?>&sort=<?= $sort ?>"><?= $i ?></a>
+                    </li>
+                    <?php endfor; ?>
+                    <li class="page-item <?= ($page >= $total_pages) ? 'disabled' : '' ?>">
+                        <a class="page-link" href="?page=<?= $page + 1 ?>&search=<?= urlencode($search) ?>&sort=<?= $sort ?>" aria-label="Next">
+                            <span aria-hidden="true">&raquo;</span>
+                        </a>
+                    </li>
+                </ul>
+            </nav>
+        </div>
         <div class="card-footer">
             <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
                 <div class="d-flex gap-3 align-items-center">
                     <button type="button" class="btn btn-sm btn-outline-secondary" id="selectAllBtn">
-                        <i class="bi bi-check-square"></i> Select All
+                        <i class="bi bi-check-square"></i> Select All Visible
                     </button>
                     <small class="text-muted"><i class="bi bi-info-circle"></i> Selected: <strong id="selectedCount">0</strong> student(s)</small>
                 </div>
@@ -446,13 +539,12 @@ const clearBtn = document.getElementById('clearStudentSearch');
 const sortSelect = document.getElementById('sortStudents');
 const tableRows = document.querySelectorAll('#studentsTable tbody .student-row');
 const studentCount = document.getElementById('studentCount');
+const totalItems = <?= (int)$total_items ?>;
 
 function updateStudentCount() {
-    const visibleRows = Array.from(tableRows).filter(row => row.style.display !== 'none');
-    const count = visibleRows.length;
-    studentCount.textContent = count;
+    studentCount.textContent = totalItems;
     
-    if (count > 0) {
+    if (totalItems > 0) {
         studentCount.classList.remove('bg-secondary');
         studentCount.classList.add('bg-primary');
     } else {
@@ -462,95 +554,50 @@ function updateStudentCount() {
 }
 
 function performSearch() {
-    const searchTerm = searchInput.value.toLowerCase().trim();
+    const searchTerm = searchInput.value.trim();
     const sortValue = sortSelect.value;
     
-    let matchingUncheckedRows = [];
-    let matchingCheckedRows = [];
-    let selectedNonMatchingRows = [];
-    
-    tableRows.forEach(row => {
-        const name = row.getAttribute('data-name') || '';
-        const lrn = row.getAttribute('data-lrn')?.toLowerCase() || '';
-        const eligible = row.getAttribute('data-eligible') === '1';
-        const checkbox = row.querySelector('.student-checkbox');
-        const isChecked = checkbox && checkbox.checked;
-        
-        // Apply filter
-        let matchesFilter = true;
-        if (sortValue === 'eligible-only' && !eligible) {
-            matchesFilter = false;
-        }
-        
-        // Apply search
-        const matchesSearch = searchTerm === '' || name.includes(searchTerm) || lrn.includes(searchTerm);
-        
-        // Show rows that match search OR are already selected
-        if (matchesFilter && (matchesSearch || isChecked)) {
-            row.style.display = '';
-            
-            // Separate into three groups
-            if (matchesSearch && !isChecked) {
-                matchingUncheckedRows.push(row); // TOP: unchecked search results
-            } else if (matchesSearch && isChecked) {
-                matchingCheckedRows.push(row); // MIDDLE: checked search results
-            } else if (isChecked) {
-                selectedNonMatchingRows.push(row); // BOTTOM: checked non-matching
-            }
-        } else {
-            row.style.display = 'none';
-        }
-    });
-    
-    // Apply sorting to all three groups
-    if (sortValue && sortValue !== 'all' && sortValue !== 'eligible-only') {
-        const sortFunction = (a, b) => {
-            const nameA = a.getAttribute('data-name') || '';
-            const nameB = b.getAttribute('data-name') || '';
-            const gradeA = parseInt(a.getAttribute('data-grade')) || 0;
-            const gradeB = parseInt(b.getAttribute('data-grade')) || 0;
-            
-            switch(sortValue) {
-                case 'name-asc':
-                    return nameA.localeCompare(nameB);
-                case 'name-desc':
-                    return nameB.localeCompare(nameA);
-                case 'grade-asc':
-                    return gradeA - gradeB;
-            }
-            return 0;
-        };
-        
-        matchingUncheckedRows.sort(sortFunction);
-        matchingCheckedRows.sort(sortFunction);
-        selectedNonMatchingRows.sort(sortFunction);
-    }
-    
-    // Reorder: unchecked first, then checked matching, then checked non-matching
-    const tbody = document.querySelector('#studentsTable tbody');
-    matchingUncheckedRows.forEach(row => tbody.appendChild(row));
-    matchingCheckedRows.forEach(row => tbody.appendChild(row));
-    selectedNonMatchingRows.forEach(row => tbody.appendChild(row));
-    
-    clearBtn.style.display = searchTerm ? 'block' : 'none';
-    updateStudentCount();
-    
-    // Update select count after filtering (in case selected items are hidden)
-    if (typeof updateSelectedCount === 'function') {
-        updateSelectedCount();
-    }
+    // Redirect to the same page with search and sort parameters
+    // This handles server-side filtering and pagination correctly
+    window.location.href = `?page=1&search=${encodeURIComponent(searchTerm)}&sort=${sortValue}`;
 }
 
-searchInput.addEventListener('input', performSearch);
+// Add debouncing to search to avoid too many reloads while typing
+let searchTimeout;
+searchInput.addEventListener('input', function() {
+    clearTimeout(searchTimeout);
+    clearBtn.style.display = this.value ? 'block' : 'none';
+    searchTimeout = setTimeout(performSearch, 700);
+});
+
 clearBtn.addEventListener('click', function() {
     searchInput.value = '';
     performSearch();
-    searchInput.focus();
 });
+
 sortSelect.addEventListener('change', performSearch);
 
 // Initialize count
 updateStudentCount();
+
+// Row click to toggle checkbox
+document.querySelector('#studentsTable tbody').addEventListener('click', function(e) {
+    const row = e.target.closest('.student-row');
+    if (!row || row.classList.contains('ineligible')) return;
+    
+    // If clicking on an interactive element (checkbox, select), don't do anything here
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'OPTION') {
+        return;
+    }
+    
+    const checkbox = row.querySelector('.student-checkbox');
+    if (checkbox) {
+        checkbox.checked = !checkbox.checked;
+        // Trigger the change event manually since we updated it via script
+        const event = new Event('change', { bubbles: true });
+        checkbox.dispatchEvent(event);
+    }
+});
 
 // Checkbox and select all functionality
 const checkboxes = document.querySelectorAll('.student-checkbox');

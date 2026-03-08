@@ -1,9 +1,12 @@
 <?php
 require_once '../includes/db.php';
 require_once '../includes/logger.php';
-include '../templates/header.php';
 
-// Admin only access
+// Admin only access check (before output)
+session_start();
+$user = $_SESSION['user'] ?? null;
+$is_admin = $user && $user['role'] === 'admin';
+
 if (!$is_admin) {
     header("Location: dashboard.php");
     exit();
@@ -91,27 +94,90 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_class'])) {
 if (isset($_GET['delete_id'])) {
     $id = (int)$_GET['delete_id'];
     
-    // Check if class is assigned to any teacher
-    $check = $conn->prepare("SELECT id FROM users WHERE grade_level = (SELECT grade_level FROM classes WHERE id = ?) AND section = (SELECT section FROM classes WHERE id = ?)");
-    $check->bind_param("ii", $id, $id);
+    // Get class info before deleting
+    $class_info = $conn->query("SELECT grade_level, section, school_year FROM classes WHERE id = $id")->fetch_assoc();
+    
+    if (!$class_info) {
+        // Class already deleted or invalid ID, redirect to clear URL
+        header("Location: classes.php");
+        exit();
+    }
+    
+    // Check if class is assigned to any teacher (adviser or subject teacher)
+    $check = $conn->prepare("SELECT id FROM teacher_assignments 
+                             WHERE grade_level = ? AND section = ? AND school_year = ?");
+    $check->bind_param("sss", $class_info['grade_level'], $class_info['section'], $class_info['school_year']);
     $check->execute();
     $check->store_result();
     
     if ($check->num_rows > 0) {
         $error = "Cannot delete this class. It is currently assigned to a teacher.";
     } else {
-        // Get class info before deleting
-        $class_info = $conn->query("SELECT grade_level, section, school_year FROM classes WHERE id = $id")->fetch_assoc();
-        
         $stmt = $conn->prepare("DELETE FROM classes WHERE id = ?");
         $stmt->bind_param("i", $id);
         
         if ($stmt->execute()) {
             logActivity($conn, $user['id'], 'DELETE', 'classes', $id, 
                        "Deleted class: Grade {$class_info['grade_level']} - {$class_info['section']} (SY: {$class_info['school_year']})");
-            $success = "Class deleted successfully!";
+            $_SESSION['success_message'] = "Class deleted successfully!";
+            header("Location: classes.php");
+            exit();
         } else {
             $error = "Error deleting class: " . $conn->error;
+        }
+    }
+}
+
+// Handle Carry Forward Classes from Previous Year
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['carry_forward'])) {
+    // 1. Get the previous school year (the one before the currently selected one)
+    $prev_sy_query = $conn->prepare("SELECT year FROM school_years WHERE year < ? ORDER BY year DESC LIMIT 1");
+    $prev_sy_query->bind_param("s", $currentSchoolYear);
+    $prev_sy_query->execute();
+    $prev_sy_res = $prev_sy_query->get_result();
+    
+    if ($prev_sy_res->num_rows === 0) {
+        $error = "No previous school year found to copy classes from.";
+    } else {
+        $prev_school_year = $prev_sy_res->fetch_assoc()['year'];
+        
+        // 2. Fetch all active classes from the previous year
+        $prev_classes_query = $conn->prepare("SELECT grade_level, section, capacity, status FROM classes WHERE school_year = ? AND status = 'Active'");
+        $prev_classes_query->bind_param("s", $prev_school_year);
+        $prev_classes_query->execute();
+        $prev_classes = $prev_classes_query->get_result();
+        
+        if ($prev_classes->num_rows === 0) {
+            $error = "No active classes found in SY $prev_school_year to carry forward.";
+        } else {
+            $count = 0;
+            $skipped = 0;
+            
+            // 3. Duplicate them for the current year
+            while ($p_class = $prev_classes->fetch_assoc()) {
+                // Check if already exists in current year
+                $check = $conn->prepare("SELECT id FROM classes WHERE grade_level = ? AND section = ? AND school_year = ?");
+                $check->bind_param("sss", $p_class['grade_level'], $p_class['section'], $currentSchoolYear);
+                $check->execute();
+                if ($check->get_result()->num_rows === 0) {
+                    $insert = $conn->prepare("INSERT INTO classes (grade_level, section, school_year, capacity, status) VALUES (?, ?, ?, ?, ?)");
+                    $insert->bind_param("sssis", $p_class['grade_level'], $p_class['section'], $currentSchoolYear, $p_class['capacity'], $p_class['status']);
+                    if ($insert->execute()) {
+                        $count++;
+                    }
+                } else {
+                    $skipped++;
+                }
+            }
+            
+            if ($count > 0) {
+                logActivity($conn, $user['id'], 'IMPORT', 'classes', null, "Carried forward $count classes from SY $prev_school_year to SY $currentSchoolYear");
+                $success = "Successfully copied $count classes from SY $prev_school_year. ($skipped already existed)";
+            } else if ($skipped > 0) {
+                $error = "All classes from SY $prev_school_year already exist in the current school year.";
+            } else {
+                $error = "Failed to copy classes.";
+            }
         }
     }
 }
@@ -125,14 +191,19 @@ $sort = isset($_GET['sort']) ? $_GET['sort'] : 'grade-asc';
 
 // Build query
 $where = [];
+// Automatically filter by the school year selected in the header
+$where[] = "school_year = '" . $conn->real_escape_string($currentSchoolYear) . "'";
+
 if ($filter_grade !== 'all') {
     $where[] = "grade_level = '$filter_grade'";
 }
 if ($filter_status !== 'all') {
     $where[] = "status = '$filter_status'";
 }
+// Note: $filter_sy is kept for backward compatibility but currentSchoolYear takes precedence for default view
 if ($filter_sy !== 'all') {
-    $where[] = "school_year = '$filter_sy'";
+    // If a specific year is chosen in the filter dropdown, it overrides the header year
+    $where[0] = "school_year = '$filter_sy'";
 }
 if (!empty($search)) {
     $search_terms = preg_split('/\s+/', trim($search));
@@ -191,12 +262,14 @@ $classes = $conn->query($classes_query);
 $school_years = $conn->query("SELECT DISTINCT school_year FROM classes ORDER BY school_year DESC");
 
 // Get statistics
-$total_classes = $conn->query("SELECT COUNT(*) as count FROM classes")->fetch_assoc()['count'];
-$active_classes = $conn->query("SELECT COUNT(*) as count FROM classes WHERE status = 'Active'")->fetch_assoc()['count'];
+$stats_where = "WHERE school_year = '" . $conn->real_escape_string($currentSchoolYear) . "'";
+$total_classes = $conn->query("SELECT COUNT(*) as count FROM classes $stats_where")->fetch_assoc()['count'];
+$active_classes = $conn->query("SELECT COUNT(*) as count FROM classes $stats_where AND status = 'Active'")->fetch_assoc()['count'];
 $total_students = $conn->query("SELECT COUNT(*) as count FROM students")->fetch_assoc()['count'];
 $total_teachers = $conn->query("SELECT COUNT(*) as count FROM users WHERE role = 'teacher'")->fetch_assoc()['count'];
 
 $current_page = 'classes';
+include '../templates/header.php';
 ?>
 
 <div class="d-flex justify-content-between align-items-start mb-4">
@@ -204,9 +277,29 @@ $current_page = 'classes';
         <h2><i class="bi bi-collection"></i> All Classes</h2>
         <p class="subtitle">Manage classes to assign to teachers</p>
     </div>
-    <a href="add_class.php" class="btn btn-primary">
-        <i class="bi bi-plus-circle"></i> Add New Class
-    </a>
+    <div class="d-flex gap-2">
+        <?php 
+        // Show copy button if no classes in current filter/year AND there are classes in the previous year
+        $has_previous_classes = false;
+        if ((int)$total_classes_filtered === 0 && !empty($currentSchoolYear)) {
+            $prev_check = $conn->prepare("SELECT COUNT(*) as count FROM classes WHERE school_year < ?");
+            $prev_check->bind_param("s", $currentSchoolYear);
+            $prev_check->execute();
+            $has_previous_classes = ($prev_check->get_result()->fetch_assoc()['count'] > 0);
+        }
+
+        if ($has_previous_classes): 
+        ?>
+            <form method="POST" onsubmit="return confirm('Copy all active classes from the previous school year to SY <?= $currentSchoolYear ?>?')">
+                <button type="submit" name="carry_forward" class="btn btn-outline-info">
+                    <i class="bi bi-arrow-repeat"></i> Copy Classes from Previous Year
+                </button>
+            </form>
+        <?php endif; ?>
+        <a href="add_class.php" class="btn btn-primary">
+            <i class="bi bi-plus-circle"></i> Add New Class
+        </a>
+    </div>
 </div>
 
 <?php if (!empty($error)): ?>
@@ -538,11 +631,11 @@ document.addEventListener('DOMContentLoaded', function() {
                                             </button>
                                             <ul class="dropdown-menu dropdown-menu-end shadow" aria-labelledby="actionsDropdown<?= $class['id'] ?>" style="z-index: 1050;">
                                                 <li><a class="dropdown-item" href="edit_class.php?id=<?= $class['id'] ?>">
-                                                    <i class="bi bi-pencil text-warning me-2"></i>Edit Class
+                                                    <i class="bi bi-pencil text-warning me-2"></i>Edit
                                                 </a></li>
                                                 <li><hr class="dropdown-divider"></li>
-                                                <li><a class="dropdown-item text-danger" href="javascript:void(0)" onclick="confirmDelete(<?= $class['id'] ?>, 'Grade <?= $class['grade_level'] ?> - <?= htmlspecialchars($class['section']) ?>')">
-                                                    <i class="bi bi-trash me-2"></i>Delete Class
+                                                <li><a class="dropdown-item text-danger" href="#" onclick="confirmDelete(<?= $class['id'] ?>, 'Grade <?= $class['grade_level'] ?> - <?= htmlspecialchars($class['section']) ?>')">
+                                                    <i class="bi bi-trash me-2"></i>Delete
                                                 </a></li>
                                             </ul>
                                         </div>
@@ -763,6 +856,7 @@ function confirmDelete(classId, className) {
         sortSelect.addEventListener('change', updateTable);
     }
 })();
+
 </script>
 
 <?php include '../templates/footer.php'; ?>

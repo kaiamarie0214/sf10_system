@@ -37,24 +37,14 @@ if (!$class) {
     exit();
 }
 
-// Get current school year from selected session year, fallback to active year, then class year
-$currentSchoolYear = $_SESSION['school_year'] ?? null;
-if (empty($currentSchoolYear)) {
-    $sy_row = $conn->query("SELECT year FROM school_years WHERE is_active = 1 LIMIT 1");
-    if ($sy_row && $sy_row->num_rows > 0) {
-        $currentSchoolYear = $sy_row->fetch_assoc()['year'];
-    }
-}
-if (empty($currentSchoolYear)) {
-    $currentSchoolYear = $class['school_year'];
-}
+// The class should always stay in its original school year when edited
+$school_year = $class['school_year'];
 
 $error = "";
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_class'])) {
     $grade_level = $_POST['grade_level'];
     $section = trim($_POST['section']);
-    $school_year = $currentSchoolYear; // always follow selected/current school year
     $capacity = (int)$_POST['capacity'];
     $status = $_POST['status'];
 
@@ -91,13 +81,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_class'])) {
     // Refresh displayed values when validation fails
     $class['grade_level'] = $grade_level;
     $class['section'] = $section;
-    $class['school_year'] = $currentSchoolYear;
     $class['capacity'] = $capacity;
     $class['status'] = $status;
 }
-
-// Always display current selected school year
-$class['school_year'] = $currentSchoolYear;
 
 include '../templates/header.php';
 $current_page = 'classes';

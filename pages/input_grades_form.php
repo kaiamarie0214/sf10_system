@@ -42,6 +42,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_save'])) {
         $subject_id = intval($_POST['subject_id']);
         $quarter = intval($_POST['quarter']);
         $grade = !empty($_POST['grade']) ? round(floatval($_POST['grade'])) : null;
+        if ($grade !== null) {
+            $grade = max(0, min(100, $grade));
+        }
         
         // Debug log
         file_put_contents('C:/xampp/htdocs/sf10_system/debug_save.log', 
@@ -248,14 +251,15 @@ if ($has_mapeh_assignment) {
     // Remove MAPEH from the list
     $assigned_subject_ids = array_diff($assigned_subject_ids, [8]);
 
-    // Fetch which MAPEH components (9,10,11,12) have a non-empty name configured for this grade
+    // Fetch which MAPEH components (9,10,11,12) have a non-empty name configured for this grade and school year
     $comp_check = $conn->prepare(
         "SELECT subject_id FROM subject_grade_groups
          WHERE subject_id IN (9,10,11,12)
          AND grade_level = ?
+         AND (school_year = ? OR school_year IS NULL)
          AND subject_name != ''"
     );
-    $comp_check->bind_param("i", $grade_level);
+    $comp_check->bind_param("is", $grade_level, $active_school_year);
     $comp_check->execute();
     $comp_result = $comp_check->get_result();
     $configured_components = [];
@@ -284,7 +288,7 @@ if (empty($assigned_subject_ids)) {
 }
 
 // Get subjects for this grade level (only those assigned to teacher)
-$subjects = getSubjectsByGrade($conn, $grade_level, true);
+$subjects = getSubjectsByGrade($conn, $grade_level, true, $active_school_year);
 
 // Filter to only show teacher's assigned subjects
 $subjects = array_filter($subjects, function($subject) use ($assigned_subject_ids) {
@@ -293,6 +297,44 @@ $subjects = array_filter($subjects, function($subject) use ($assigned_subject_id
 
 // Re-index array after filtering
 $subjects = array_values($subjects);
+
+// Custom sort to group MAPEH components together
+usort($subjects, function($a, $b) {
+    // Priority: Group MAPEH (8) and components (9-12) together
+    $mapeh_ids = [8, 9, 10, 11, 12];
+    $a_id = (int)$a['id'];
+    $b_id = (int)$b['id'];
+    
+    $a_is_mapeh = in_array($a_id, $mapeh_ids);
+    $b_is_mapeh = in_array($b_id, $mapeh_ids);
+    
+    if ($a_is_mapeh && $b_is_mapeh) {
+        // Both are MAPEH related, sort by ID (usually 8, 9, 10, 11, 12)
+        return $a_id <=> $b_id;
+    }
+    
+    if ($a_is_mapeh) {
+        // Only a is MAPEH, use a virtual display order of 8 to group it
+        $a_order = 8;
+        $b_order = (int)$b['display_order'];
+        if ($a_order != $b_order) return $a_order <=> $b_order;
+        return strcmp($a['subject_name'], $b['subject_name']);
+    }
+    
+    if ($b_is_mapeh) {
+        // Only b is MAPEH
+        $a_order = (int)$a['display_order'];
+        $b_order = 8;
+        if ($a_order != $b_order) return $a_order <=> $b_order;
+        return strcmp($a['subject_name'], $b['subject_name']);
+    }
+    
+    // Neither is MAPEH, use standard sort
+    if ($a['display_order'] != $b['display_order']) {
+        return $a['display_order'] <=> $b['display_order'];
+    }
+    return strcmp($a['subject_name'], $b['subject_name']);
+});
 
 if (empty($subjects)) {
     $_SESSION['error_message'] = "No subjects found for grade level $grade_level";
@@ -319,6 +361,32 @@ $students_result = $st_stmt->get_result();
 $students = [];
 while ($row = $students_result->fetch_assoc()) {
     $students[] = $row;
+}
+
+// Get custom subject names for all students in this class
+$custom_subject_names = [];
+if (!empty($students)) {
+    $student_ids = array_column($students, 'id');
+    $school_attended_ids = array_column($students, 'school_attended_id');
+    $placeholders_students = str_repeat('?,', count($student_ids) - 1) . '?';
+    $placeholders_sa = str_repeat('?,', count($school_attended_ids) - 1) . '?';
+
+    $custom_query = "SELECT student_id, subject_id, custom_subject_name 
+                     FROM student_custom_subjects 
+                     WHERE student_id IN ($placeholders_students) 
+                     AND school_attended_id IN ($placeholders_sa)
+                     AND subject_id = ?";
+    
+    $cs_stmt = $conn->prepare($custom_query);
+    $params = array_merge($student_ids, $school_attended_ids, [$active_subject_id]);
+    $types = str_repeat('i', count($params));
+    $cs_stmt->bind_param($types, ...$params);
+    $cs_stmt->execute();
+    $cs_result = $cs_stmt->get_result();
+    
+    while ($cs_row = $cs_result->fetch_assoc()) {
+        $custom_subject_names[$cs_row['student_id']] = $cs_row['custom_subject_name'];
+    }
 }
 
 // Get all existing grades for these students and subjects
@@ -538,7 +606,12 @@ if (!$active_subject && count($subjects) > 0) {
                             <tr id="student-row-<?= $student['id'] ?>" <?= $is_target ? 'class="table-primary target-student"' : '' ?>>
                                 <td>
                                     <?php echo htmlspecialchars($student['last_name'] . ', ' . $student['first_name']); ?>
-                                    <?php if (!empty($student['is_transfer'])): ?>
+                                    <?php if (!empty($student['is_transfer'])): 
+                                        $display_name = isset($custom_subject_names[$student['id']]) 
+                                            ? $custom_subject_names[$student['id']] 
+                                            : $active_subject['subject_name'];
+                                    ?>
+                                        <br><small class="text-muted"><i>Subject: <?= htmlspecialchars($display_name) ?></i></small>
                                         <span class="badge bg-danger ms-1" style="font-size:0.75em; padding: 4px 8px;" title="Transferee<?= !empty($student['transfer_quarter']) ? ' - Q' . $student['transfer_quarter'] : '' ?>">
                                             <i class="bi bi-arrow-left-right"></i> TRANSFEREE<?= !empty($student['transfer_quarter']) ? ' - Q' . $student['transfer_quarter'] : '' ?>
                                         </span>
@@ -611,6 +684,15 @@ document.addEventListener('DOMContentLoaded', function() {
     gradeInputs.forEach(input => {
         input.addEventListener('input', function() {
             if (this.dataset.locked === '1') return;
+            
+            // Prevent input over 100
+            let val = parseFloat(this.value);
+            if (val > 100) {
+                this.value = 100;
+            } else if (val < 0) {
+                this.value = 0;
+            }
+            
             modifiedInputs.add(this);
             // Recalculate average immediately
             recalculateAverage(this.closest('tr'));

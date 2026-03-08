@@ -349,13 +349,44 @@ $is_admin = ($user['role'] === 'admin');
     <script>
       // Switch school year function for admin
       function switchSchoolYear(schoolYearId, schoolYearName) {
-        if (confirm('Switch to school year ' + schoolYearName + '?\\n\\nThis will reload the page with the new school year data.')) {
+        // Create a warning modal matching the delete modal design
+        const modalId = 'sySwitchModal';
+        const existing = document.getElementById(modalId);
+        if (existing) existing.remove();
+
+        const modalHtml = `
+          <div class="modal fade" id="${modalId}" tabindex="-1" style="margin-top: 80px;">
+            <div class="modal-dialog">
+              <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                  <h5 class="modal-title"><i class="bi bi-exclamation-triangle"></i> Confirm School Year Change</h5>
+                  <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                  <p>Are you sure you want to switch to school year <strong>SY ${schoolYearName}</strong>?</p>
+                  <p class="text-danger"><i class="bi bi-info-circle"></i> This will reload the system with data for the selected school year. Any unsaved changes will be lost.</p>
+                </div>
+                <div class="modal-footer">
+                  <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                  <button type="button" class="btn btn-primary" id="confirmSySwitch">Switch School Year</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        `;
+
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+        const modalEl = document.getElementById(modalId);
+        const modal = new bootstrap.Modal(modalEl);
+        
+        document.getElementById('confirmSySwitch').onclick = function() {
+          modal.hide();
+          
           // Show loading indicator
           const blocker = document.getElementById('pjaxBlocker');
           if (blocker) blocker.style.display = 'block';
           
           // Make AJAX request to switch school year
-          // Detect if we're already in /pages/ directory
           const currentPath = window.location.pathname;
           const switchUrl = currentPath.includes('/pages/') ? 'switch_school_year.php' : '../pages/switch_school_year.php';
           
@@ -369,7 +400,6 @@ $is_admin = ($user['role'] === 'admin');
           .then(response => response.json())
           .then(data => {
             if (data.success) {
-              // Reload the current page to reflect new school year
               window.location.reload();
             } else {
               alert('Error switching school year: ' + (data.message || 'Unknown error'));
@@ -381,7 +411,13 @@ $is_admin = ($user['role'] === 'admin');
             console.error('Error:', error);
             if (blocker) blocker.style.display = 'none';
           });
-        }
+        };
+
+        modalEl.addEventListener('hidden.bs.modal', function () {
+          modalEl.remove();
+        });
+
+        modal.show();
       }
     </script>
     <!-- Logout Button -->
@@ -739,5 +775,59 @@ $needs_setup = $is_admin && empty($_SESSION['school_year_id']);
 
   window.addEventListener('popstate', function(e){ if (e.state && e.state.pjax) { loadUrl(location.pathname + location.search, false); } });
 })();
+
+/**
+ * Global confirmation modal using Bootstrap
+ * @param {string} title - Modal title
+ * @param {string} message - Modal body content (HTML supported)
+ * @param {function} onConfirm - Callback when user clicks Confirm
+ */
+function showConfirmModal(title, message, onConfirm) {
+  // Remove existing modal if any
+  const existing = document.getElementById('globalConfirmModal');
+  if (existing) existing.remove();
+
+  const modalHtml = `
+    <div class="modal fade" id="globalConfirmModal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content border-0 shadow">
+          <div class="modal-header border-0 pb-0">
+            <h5 class="modal-title fw-bold">${title}</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body py-4">
+            <div class="d-flex align-items-start gap-3">
+              <div class="flex-shrink-0 text-warning">
+                <i class="bi bi-exclamation-triangle-fill fs-2"></i>
+              </div>
+              <div class="flex-grow-1">
+                ${message}
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer border-0 pt-0">
+            <button type="button" class="btn btn-light px-4" data-bs-dismiss="modal">Cancel</button>
+            <button type="button" class="btn btn-primary px-4" id="globalConfirmBtn">Confirm</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+  const modalEl = document.getElementById('globalConfirmModal');
+  const modal = new bootstrap.Modal(modalEl);
+  
+  document.getElementById('globalConfirmBtn').onclick = function() {
+    modal.hide();
+    if (typeof onConfirm === 'function') onConfirm();
+  };
+
+  modalEl.addEventListener('hidden.bs.modal', function () {
+    modalEl.remove();
+  });
+
+  modal.show();
+}
 </script>
 

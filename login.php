@@ -886,7 +886,7 @@ $start_on_register = ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['act
 </div><!-- /.auth-container -->
 
 <div class="auth-footer">
-  <small>&copy; <?= date('Y') ?> SF10 System | v1.7.0. All rights reserved.</small>
+  <small>&copy; <?= date('Y') ?> SF10 System | v1.7.3 All rights reserved.</small>
 </div>
 
 <script>

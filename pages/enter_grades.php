@@ -28,16 +28,33 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'get_grades') {
       $school_year = $school_data['school_year'] ?? null;
       $grade_level = $school_data['grade_level'] ?? null;
 
-      // Load global subject display names for THIS school year and grade level
+      // Extract numeric grade level for lookup
+      $grade_level_num = null;
+      if ($grade_level) {
+          if (preg_match('/(\d+)/', $grade_level, $m)) {
+              $grade_level_num = intval($m[1]);
+          } else {
+              $roman_map = ['I' => 1, 'II' => 2, 'III' => 3, 'IV' => 4, 'V' => 5, 'VI' => 6];
+              $clean_grade = strtoupper(trim($grade_level));
+              if (isset($roman_map[$clean_grade])) {
+                  $grade_level_num = $roman_map[$clean_grade];
+              }
+          }
+      }
+
+    // Load global subject display names for THIS school year and grade level
       $subject_grade_names = [];
-      if ($grade_level && $school_year) {
+      if ($grade_level_num) {
           $name_query = $conn->prepare("SELECT subject_id, subject_name FROM subject_grade_groups 
-                                       WHERE grade_level = ? AND school_year = ?");
-          $name_query->bind_param("is", $grade_level, $school_year);
+                                       WHERE grade_level = ? AND (school_year = ? OR school_year IS NULL)");
+          $name_query->bind_param("is", $grade_level_num, $school_year);
           $name_query->execute();
           $name_res = $name_query->get_result();
           while ($nrow = $name_res->fetch_assoc()) {
-              $subject_grade_names[$nrow['subject_id']] = $nrow['subject_name'];
+              // Prioritize school-year specific names over global ones
+              if (!isset($subject_grade_names[$nrow['subject_id']]) || !empty($nrow['subject_name'])) {
+                  $subject_grade_names[$nrow['subject_id']] = $nrow['subject_name'];
+              }
           }
       }
 
@@ -149,15 +166,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['grades'])) {
     $school_info_query->bind_param("i", $school_attended_id);
     $school_info_query->execute();
     $school_info = $school_info_query->get_result()->fetch_assoc();
-    $school_year = $school_info['school_year'];
-    $grade_level_for_remedial = $school_info['grade_level'] ?? null;
+    $school_year = $school_info['school_year'] ?? null;
     
     // Get school_year_id
-    $sy_query = $conn->prepare("SELECT id FROM school_years WHERE year = ?");
-    $sy_query->bind_param("s", $school_year);
-    $sy_query->execute();
-    $sy_result = $sy_query->get_result()->fetch_assoc();
-    $school_year_id = $sy_result['id'] ?? null;
+    $school_year_id = null;
+    if ($school_year) {
+        $sy_query = $conn->prepare("SELECT id FROM school_years WHERE year = ?");
+        $sy_query->bind_param("s", $school_year);
+        $sy_query->execute();
+        $sy_result = $sy_query->get_result()->fetch_assoc();
+        $school_year_id = $sy_result['id'] ?? null;
+    }
+
+    // Extract numeric grade level for comparison logic
+    $grade_level_raw = $school_info['grade_level'] ?? null;
+    $grade_level_num = null;
+    if ($grade_level_raw) {
+        if (preg_match('/(\d+)/', $grade_level_raw, $m)) {
+            $grade_level_num = intval($m[1]);
+        } else {
+            $roman_map = ['I' => 1, 'II' => 2, 'III' => 3, 'IV' => 4, 'V' => 5, 'VI' => 6];
+            $clean_grade = strtoupper(trim($grade_level_raw));
+            if (isset($roman_map[$clean_grade])) {
+                $grade_level_num = $roman_map[$clean_grade];
+            }
+        }
+    }
     
     try {
         // Save custom subject names for transfer students
@@ -172,14 +206,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['grades'])) {
             foreach ($_POST['custom_subject_names'] as $subject_id => $custom_name) {
                 $custom_name = trim($custom_name);
 
-            // Get default subject name
+            // Get global custom name for this grade and year
+            $global_query = $conn->prepare("SELECT subject_name FROM subject_grade_groups 
+                                           WHERE grade_level = ? AND (school_year = ? OR school_year IS NULL) AND subject_id = ?
+                                           ORDER BY school_year DESC LIMIT 1");
+            $global_query->bind_param("isi", $grade_level_num, $school_year, $subject_id);
+            $global_query->execute();
+            $global_result = $global_query->get_result()->fetch_assoc();
+            
+            // Get default subject name as fallback
             $default_query = $conn->prepare("SELECT subject_name FROM subjects WHERE id = ?");
             $default_query->bind_param("i", $subject_id);
             $default_query->execute();
             $default_result = $default_query->get_result()->fetch_assoc();
+            
+            $compare_name = ($global_result && $global_result['subject_name'] !== '') 
+                            ? $global_result['subject_name'] 
+                            : ($default_result ? $default_result['subject_name'] : '');
 
-            // If same as default, remove override; otherwise save override (including empty string)
-            if ($default_result && $custom_name === $default_result['subject_name']) {
+            // If same as global custom or default, remove override; otherwise save override (including empty string)
+            if ($custom_name === $compare_name) {
               $delete_custom->bind_param("iii", $student_id, $school_attended_id, $subject_id);
               $delete_custom->execute();
             } else {
@@ -704,29 +750,34 @@ function renderGradesTable(grades, schoolAttendedId, isTransfer = false, selecte
     const q4 = gradeData.q4 || '';
     const finalRating = gradeData.final_rating || '';
     const remarks = gradeData.remarks || '';
-    const customSubjectName = Object.prototype.hasOwnProperty.call(gradeData, 'custom_subject_name')
-      ? gradeData.custom_subject_name
-      : subject.subject_name;
     const regularSubjectName = Object.prototype.hasOwnProperty.call(gradeSubjectNames, String(subject.id))
       ? gradeSubjectNames[String(subject.id)]
       : subject.subject_name;
+      
+    // For transfer students, if the global alias is empty, use the default subject name
+    // This ensures transfer students can still enter grades for subjects that are globally "hidden"
+    const effectiveRegularName = (isTransfer && regularSubjectName === '') ? subject.subject_name : regularSubjectName;
+
+    const customSubjectName = Object.prototype.hasOwnProperty.call(gradeData, 'custom_subject_name')
+      ? gradeData.custom_subject_name
+      : effectiveRegularName;
 
     const isMapeh = subject.subject_name === 'MAPEH';
     const isMapehComponent = mapehComponents.includes(subject.subject_name);
     const isGeneralAverage = subject.subject_name === 'General Average';
     if (isGeneralAverage) hasGeneralAverageRow = true;
 
-    // A MAPEH component is "not configured" if subject_grade_groups has it with an empty name
+    // A subject is "not configured" if subject_grade_groups has it with an empty name
     // IMPORTANT: Transfer students are NEVER "unconfigured" by global settings, but they ARE disabled if they have no custom name set
     const configuredName = gradeSubjectNames[String(subject.id)];
-    const isUnconfiguredMapehComponent = !isTransfer && isMapehComponent &&
+    const isUnconfiguredSubject = !isTransfer && 
       Object.prototype.hasOwnProperty.call(gradeSubjectNames, String(subject.id)) &&
       configuredName === '';
     
     // Transfer students' grades are disabled if the custom subject name is explicitly empty
     const isUnconfiguredTransferSubject = isTransfer && customSubjectName === '';
     
-    const isDisabled = isUnconfiguredMapehComponent || isUnconfiguredTransferSubject;
+    const isDisabled = isUnconfiguredSubject || isUnconfiguredTransferSubject;
     
     // Add visual class for special computed rows
     const rowClass = isMapeh ? 'mapeh-row' : (isGeneralAverage ? 'general-average-row' : '');

@@ -108,27 +108,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     if (!preg_match('/^\d{4}-\d{4}$/', $school_year)) {
         $_SESSION['error_message'] = "Invalid school year format. Use YYYY-YYYY";
     } else {
-        // Automatically detect if this is an internal school record (regular)
-        // by checking if the adviser name exists in our users table
         $adviser_name = trim($_POST['adviser_name']);
-        $is_internal = 0;
-        if (!empty($adviser_name)) {
-            $check_user = $conn->prepare("SELECT id FROM users WHERE LOWER(full_name) = LOWER(?) LIMIT 1");
-            $check_user->bind_param("s", $adviser_name);
-            $check_user->execute();
-            if ($check_user->get_result()->num_rows > 0) {
-                $is_internal = 1;
-            }
-        }
-        $is_transfer = ($is_internal === 1) ? 0 : 1;
+        $transfer_quarter = !empty($_POST['transfer_quarter']) ? (int)$_POST['transfer_quarter'] : null;
+        $is_transfer = ($transfer_quarter !== null) ? 1 : 0;
 
         // ALLOW multiple records per year for mid-year transfers
         // Insert new school record
         $stmt = $conn->prepare("INSERT INTO schools_attended 
-            (student_id, school_name, school_id, district, division, region, grade_level, section, school_year, adviser_name, is_transfer)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            (student_id, school_name, school_id, district, division, region, grade_level, section, school_year, adviser_name, is_transfer, transfer_quarter)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             
-            $stmt->bind_param("isssssisssi",
+            $stmt->bind_param("isssssisssii",
                 $student_id,
                 $_POST['school_name'],
                 $_POST['school_id'],
@@ -139,7 +129,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 $_POST['section'],
                 $school_year,
                 $adviser_name,
-                $is_transfer
+                $is_transfer,
+                $transfer_quarter
             );
             
             if ($stmt->execute()) {
@@ -174,27 +165,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     if (!preg_match('/^\d{4}-\d{4}$/', $school_year)) {
         $_SESSION['error_message'] = "Invalid school year format. Use YYYY-YYYY";
     } else {
-        // Automatically detect if this is an internal school record (regular)
-        // by checking if the adviser name exists in our users table
         $adviser_name = trim($_POST['adviser_name']);
-        $is_internal = 0;
-        if (!empty($adviser_name)) {
-            $check_user = $conn->prepare("SELECT id FROM users WHERE LOWER(full_name) = LOWER(?) LIMIT 1");
-            $check_user->bind_param("s", $adviser_name);
-            $check_user->execute();
-            if ($check_user->get_result()->num_rows > 0) {
-                $is_internal = 1;
-            }
-        }
-        $is_transfer = ($is_internal === 1) ? 0 : 1;
+        $transfer_quarter = !empty($_POST['transfer_quarter']) ? (int)$_POST['transfer_quarter'] : null;
+        $is_transfer = ($transfer_quarter !== null) ? 1 : 0;
 
         // ALLOW multiple records per year for mid-year transfers
         $stmt = $conn->prepare("UPDATE schools_attended SET 
             school_name = ?, school_id = ?, district = ?, division = ?, region = ?,
-            section = ?, school_year = ?, adviser_name = ?, is_transfer = ?
+            section = ?, school_year = ?, adviser_name = ?, is_transfer = ?, transfer_quarter = ?
             WHERE id = ?");
             
-            $stmt->bind_param("ssssssssii",
+            $stmt->bind_param("ssssssssiii",
                 $_POST['school_name'],
                 $_POST['school_id'],
                 $_POST['district'],
@@ -204,6 +185,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 $school_year,
                 $adviser_name,
                 $is_transfer,
+                $transfer_quarter,
                 $record_id
             );
             
@@ -517,7 +499,7 @@ include "../templates/header.php";
                                     <h5 class="mb-0 text-primary">
                                         <i class="bi bi-calendar3 me-2"></i> School Year: <?= htmlspecialchars($record['school_year'] ?: '-') ?>
                                         <?php if ($record['is_transfer']): ?>
-                                            <span class="badge bg-info ms-2">Transferee</span>
+                                            <span class="badge bg-info ms-2">Transferee<?= $record['transfer_quarter'] ? ' - Q' . $record['transfer_quarter'] : '' ?></span>
                                         <?php endif; ?>
                                     </h5>
                                 </div>
@@ -578,14 +560,14 @@ include "../templates/header.php";
                             <div class="ms-4 d-flex flex-column gap-2 align-items-center justify-content-center" style="min-width: 100px;">
                                 <div class="text-muted small mb-1 fw-bold">SEQUENCE</div>
                                 <button type="button" class="btn btn-outline-primary reorder-btn-lg" 
-                                        onclick="reorderRecord(<?= $record['id'] ?>, 'up')" 
+                                        onclick="reorderRecord(this, <?= $record['id'] ?>, 'up')" 
                                         title="Move Up"
                                         <?= $idx === 0 ? 'disabled' : '' ?>>
                                     <i class="bi bi-chevron-up fs-4"></i>
                                     <span class="d-block small">MOVE UP</span>
                                 </button>
                                 <button type="button" class="btn btn-outline-primary reorder-btn-lg" 
-                                        onclick="reorderRecord(<?= $record['id'] ?>, 'down')" 
+                                        onclick="reorderRecord(this, <?= $record['id'] ?>, 'down')" 
                                         title="Move Down"
                                         <?= $idx === count($grade_records) - 1 ? 'disabled' : '' ?>>
                                     <i class="bi bi-chevron-down fs-4"></i>
@@ -649,6 +631,16 @@ include "../templates/header.php";
                                             <label class="form-label text-body">Adviser Name</label>
                                             <input type="text" class="form-control" name="adviser_name" 
                                                    value="<?= htmlspecialchars(getAdviserFullName($conn, $record) ?: '') ?>">
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label text-body">Transferee Quarter</label>
+                                            <select name="transfer_quarter" class="form-select">
+                                                <option value="" <?= empty($record['transfer_quarter']) ? 'selected' : '' ?>>Not Transfer</option>
+                                                <option value="1" <?= ($record['transfer_quarter'] == 1) ? 'selected' : '' ?>>Q1</option>
+                                                <option value="2" <?= ($record['transfer_quarter'] == 2) ? 'selected' : '' ?>>Q2</option>
+                                                <option value="3" <?= ($record['transfer_quarter'] == 3) ? 'selected' : '' ?>>Q3</option>
+                                                <option value="4" <?= ($record['transfer_quarter'] == 4) ? 'selected' : '' ?>>Q4</option>
+                                            </select>
                                         </div>
                                     </div>
                                     <div class="mt-3">
@@ -715,15 +707,26 @@ include "../templates/header.php";
                                     <label class="form-label">Region</label>
                                     <input type="text" class="form-control" name="region">
                                 </div>
-                                <div class="col-md-6">
-                                    <label class="form-label">Section <span class="text-danger">*</span></label>
-                                    <input type="text" class="form-control" name="section" required>
-                                </div>
-                                <div class="col-md-6">
-                                    <label class="form-label">Adviser Name</label>
-                                    <input type="text" class="form-control" name="adviser_name">
-                                </div>
-                            </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label">Section <span class="text-danger">*</span></label>
+                                            <input type="text" class="form-control" name="section" required>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label">Adviser Name</label>
+                                            <input type="text" class="form-control" name="adviser_name">
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label">Transferee Quarter</label>
+                                            <select name="transfer_quarter" class="form-select">
+                                                <option value="">Not Transfer</option>
+                                                <option value="1">Q1</option>
+                                                <option value="2">Q2</option>
+                                                <option value="3">Q3</option>
+                                                <option value="4">Q4</option>
+                                            </select>
+                                            <small class="text-muted">Select if student transferred to this school mid-year.</small>
+                                        </div>
+                                    </div>
                             <div class="mt-3">
                                 <button type="submit" class="btn btn-primary btn-sm">Save Record</button>
                                 <button type="button" class="btn btn-secondary btn-sm" data-bs-toggle="collapse" data-bs-target="#addForm<?= $grade ?>">Cancel</button>
@@ -783,10 +786,9 @@ include "../templates/header.php";
     }
 })();
 
-function reorderRecord(recordId, direction) {
+function reorderRecord(btn, recordId, direction) {
     if (!confirm(`Are you sure you want to move this record ${direction}?`)) return;
     
-    const btn = event.currentTarget;
     btn.disabled = true;
     
     fetch(`?ajax=reorder_school&student_id=<?= $student_id ?>`, {

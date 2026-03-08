@@ -21,9 +21,12 @@ $success = "";
 $error = "";
 
 // Get classes (grade levels and sections) for dropdowns
+// Filter by current school year to avoid duplicates from past years
+$current_school_year = $_SESSION['school_year'] ?? '';
 $classes_query = "SELECT DISTINCT grade_level, section, school_year, status 
                   FROM classes 
                   WHERE status = 'Active' 
+                  AND school_year = '" . $conn->real_escape_string($current_school_year) . "'
                   ORDER BY grade_level, section";
 $classes_result = $conn->query($classes_query);
 $classes_data = [];
@@ -43,24 +46,31 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'get_grade_subjects') {
         exit;
     }
     
-    // Get all subjects
-    $all_subjects = $conn->query("SELECT id, subject_name FROM subjects WHERE subject_name != 'General Average' ORDER BY id");
-    $subjects_list = [];
+    // Get current school year
+    $school_year = $_SESSION['school_year'] ?? '';
     
-    while ($subject = $all_subjects->fetch_assoc()) {
-        // Check if there's a customized name for this grade level
-        $grade_query = $conn->query("SELECT subject_name FROM subject_grade_groups 
-                                     WHERE grade_level = $grade AND subject_id = {$subject['id']}");
-        
-        $display_name = $subject['subject_name'];
-        if ($grade_query && $grade_query->num_rows > 0) {
-            $grade_data = $grade_query->fetch_assoc();
-            $display_name = $grade_data['subject_name'];
-        }
-        
+    // Get subjects configured for this grade level and school year
+    // Only include subjects that have a non-empty display name set in the configuration
+    // AND exclude individual MAPEH components (Music, Arts, PE, Health) from separate assignment
+    $query = "SELECT s.id, sgg.subject_name AS display_name
+              FROM subject_grade_groups sgg
+              JOIN subjects s ON sgg.subject_id = s.id
+              WHERE sgg.grade_level = ? 
+              AND (sgg.school_year = ? OR sgg.school_year IS NULL)
+              AND sgg.subject_name IS NOT NULL AND sgg.subject_name != ''
+              AND s.subject_name NOT IN ('Music', 'Arts', 'Physical Education', 'Health')
+              ORDER BY s.display_order, s.subject_name";
+              
+    $stmt = $conn->prepare($query);
+    $stmt->bind_param("is", $grade, $school_year);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    
+    $subjects_list = [];
+    while ($row = $result->fetch_assoc()) {
         $subjects_list[] = [
-            'id' => $subject['id'],
-            'name' => $display_name
+            'id' => $row['id'],
+            'name' => $row['display_name']
         ];
     }
     

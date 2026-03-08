@@ -104,9 +104,11 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_sections' && isset($_GET[
         $sections[] = $row['section'];
     }
     
-    // Also check classes table if it exists
+    // Also check classes table if it exists (filter by current school year)
+    $current_school_year = $_SESSION['school_year'] ?? '';
     $classes_query = "SELECT DISTINCT section FROM classes 
-                     WHERE grade_level = ? AND section IS NOT NULL AND section != ''";
+                     WHERE grade_level = ? AND section IS NOT NULL AND section != ''
+                     AND school_year = '" . $conn->real_escape_string($current_school_year) . "'";
     $stmt2 = $conn->prepare($classes_query);
     if ($stmt2) {
         $stmt2->bind_param("i", $grade_level);
@@ -446,15 +448,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     $existing = $result->fetch_assoc();
     $_SESSION['error_message'] = "A school record already exists for this student in Grade {$_POST['grade_level']} - {$existing['section']} for School Year {$school_year}.";
   } else {
-    // Always set is_transfer = 1 (transfer) by default when adding a new school record
-    $stmt = $conn->prepare("INSERT INTO schools_attended 
-      (student_id, school_name, school_id, district, division, region, grade_level, section, school_year, adviser_name, is_transfer)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)");
+    $transfer_quarter = !empty($_POST['transfer_quarter']) ? (int)$_POST['transfer_quarter'] : null;
+    $is_transfer = ($transfer_quarter !== null) ? 1 : 0;
 
-    $stmt->bind_param("isssssisss",
+    $stmt = $conn->prepare("INSERT INTO schools_attended 
+      (student_id, school_name, school_id, district, division, region, grade_level, section, school_year, adviser_name, is_transfer, transfer_quarter)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+
+    $stmt->bind_param("isssssisssii",
       $_POST['student_id'], $_POST['school_name'], $_POST['school_id'], 
       $_POST['district'], $_POST['division'], $_POST['region'],
-      $_POST['grade_level'], $_POST['section'], $school_year, $_POST['adviser_name']
+      $_POST['grade_level'], $_POST['section'], $school_year, $_POST['adviser_name'],
+      $is_transfer, $transfer_quarter
     );
 
     if ($stmt->execute()) {
@@ -494,15 +499,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $existing = $result->fetch_assoc();
         $_SESSION['error_message'] = "A school record already exists for this student in Grade {$_POST['grade_level']} - {$existing['section']} for School Year {$school_year}.";
     } else {
+        $transfer_quarter = !empty($_POST['transfer_quarter']) ? (int)$_POST['transfer_quarter'] : null;
+        $is_transfer = ($transfer_quarter !== null) ? 1 : 0;
+
         $stmt = $conn->prepare("UPDATE schools_attended SET 
             student_id = ?, school_name = ?, school_id = ?, district = ?, division = ?, region = ?,
-            grade_level = ?, section = ?, school_year = ?, adviser_name = ?
+            grade_level = ?, section = ?, school_year = ?, adviser_name = ?, is_transfer = ?, transfer_quarter = ?
             WHERE id = ?");
         
-        $stmt->bind_param("isssssisssi",
+        $stmt->bind_param("isssssisssiii",
             $_POST['student_id'], $_POST['school_name'], $_POST['school_id'], 
             $_POST['district'], $_POST['division'], $_POST['region'],
             $_POST['grade_level'], $_POST['section'], $school_year, $_POST['adviser_name'],
+            $is_transfer, $transfer_quarter,
             $record_id
         );
         
@@ -603,6 +612,7 @@ if (!empty($students)) {
                     WHERE sa.student_id IN ($in_ids)
                     ORDER BY
                       sa.student_id ASC,
+                      sa.grade_level DESC,
                       CASE WHEN sa.school_year = '{$selected_school_year_escaped}' THEN 0 ELSE 1 END ASC,
                       sa.id DESC";
   $records_result = $conn->query($records_query);
@@ -1600,9 +1610,19 @@ body.dark-theme .pagination-container {
               <label class="form-label">School Year<br/>(To) <span class="text-danger">*</span></label>
               <input type="text" name="school_year_to" class="form-control" placeholder="2026" required>
             </div>
-            <div class="col-md-4">
+            <div class="col-md-2">
               <label class="form-label">Adviser Name</label>
               <input type="text" name="adviser_name" class="form-control" placeholder="Adviser Name">
+            </div>
+            <div class="col-md-2">
+              <label class="form-label">Transferee</label>
+              <select name="transfer_quarter" class="form-select">
+                <option value="">Not Transfer</option>
+                <option value="1">Q1</option>
+                <option value="2">Q2</option>
+                <option value="3">Q3</option>
+                <option value="4">Q4</option>
+              </select>
             </div>
           </div>
         </div>
@@ -1684,9 +1704,19 @@ body.dark-theme .pagination-container {
               <label class="form-label">School Year<br/>(To) <span class="text-danger">*</span></label>
               <input type="text" name="school_year_to" id="edit_school_year_to" class="form-control" placeholder="2026" required>
             </div>
-            <div class="col-md-4">
+            <div class="col-md-2">
               <label class="form-label">Adviser Name</label>
               <input type="text" name="adviser_name" id="edit_adviser_name" class="form-control" placeholder="Adviser Name">
+            </div>
+            <div class="col-md-2">
+              <label class="form-label">Transferee</label>
+              <select name="transfer_quarter" id="edit_transfer_quarter" class="form-select">
+                <option value="">Not Transfer</option>
+                <option value="1">Q1</option>
+                <option value="2">Q2</option>
+                <option value="3">Q3</option>
+                <option value="4">Q4</option>
+              </select>
             </div>
           </div>
         </div>

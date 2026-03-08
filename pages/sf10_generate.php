@@ -197,8 +197,8 @@ function getSubjectNameForStudent($conn, $subject_id, $student_id, $school_atten
         }
     }
     
-    // IMPORTANT: Only use grade-level config for regular students (non-transfer)
-    if (!$is_transfer && $grade_level_num) {
+    // Check grade-level configuration (global aliases)
+    if ($grade_level_num) {
         $table_check = $conn->query("SHOW TABLES LIKE 'subject_grade_groups'");
         
         if ($table_check && $table_check->num_rows > 0) {
@@ -211,8 +211,10 @@ function getSubjectNameForStudent($conn, $subject_id, $student_id, $school_atten
             
             if ($group_res && $group_res->num_rows > 0) {
                 $group_result = $group_res->fetch_assoc();
-                // Return the alias name (even if empty) to respect grade-level configuration
-                return $group_result['subject_name'];
+                // Return the alias name if not empty
+                if (!empty($group_result['subject_name'])) {
+                    return $group_result['subject_name'];
+                }
             }
         }
     }

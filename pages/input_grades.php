@@ -32,7 +32,9 @@ $assignments_query = "SELECT DISTINCT ta.grade_level, ta.section, ta.subject_id,
                      COALESCE(NULLIF(sgg.subject_name, ''), s.subject_name) AS subject_name
                      FROM teacher_assignments ta
                      LEFT JOIN subjects s ON ta.subject_id = s.id
-                     LEFT JOIN subject_grade_groups sgg ON sgg.subject_id = ta.subject_id AND sgg.grade_level = ta.grade_level
+                     LEFT JOIN subject_grade_groups sgg ON sgg.subject_id = ta.subject_id 
+                          AND sgg.grade_level = ta.grade_level
+                          AND (sgg.school_year = ta.school_year OR sgg.school_year IS NULL)
                      WHERE ta.teacher_id = ?
                      AND ta.assignment_type = 'subject'
                      AND ta.school_year = ?

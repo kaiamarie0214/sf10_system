@@ -39,7 +39,7 @@ function getSubjectNameForStudent($conn, $subject_id, $student_id, $school_atten
         }
     }
     
-    // First check if there's a custom subject name for this transfer student
+    // Check if there's a custom subject name for this student (custom override)
     $table_check = $conn->query("SHOW TABLES LIKE 'student_custom_subjects'");
     if ($table_check && $table_check->num_rows > 0) {
         $custom_query = $conn->query("SELECT custom_subject_name 
@@ -54,22 +54,25 @@ function getSubjectNameForStudent($conn, $subject_id, $student_id, $school_atten
         }
     }
     
-    // IMPORTANT: Only use grade-level config for regular students (non-transfer)
-    if (!$is_transfer && $grade_level_num) {
+    // Check grade-level configuration (global aliases)
+    if ($grade_level_num) {
         $table_check = $conn->query("SHOW TABLES LIKE 'subject_grade_groups'");
         
         if ($table_check && $table_check->num_rows > 0) {
             $group_query = $conn->prepare("SELECT subject_name FROM subject_grade_groups 
                                           WHERE grade_level = ? AND subject_id = ? 
-                                          AND (school_year = ? OR school_year IS NULL)");
+                                          AND (school_year = ? OR school_year IS NULL)
+                                          ORDER BY school_year DESC LIMIT 1");
             $group_query->bind_param("iis", $grade_level_num, $subject_id, $school_year);
             $group_query->execute();
             $group_res = $group_query->get_result();
             
             if ($group_res && $group_res->num_rows > 0) {
                 $group_result = $group_res->fetch_assoc();
-                // Return the alias name (even if empty) to respect grade-level configuration
-                return $group_result['subject_name'];
+                // Only return if name is not empty
+                if (!empty($group_result['subject_name'])) {
+                    return $group_result['subject_name'];
+                }
             }
         }
     }

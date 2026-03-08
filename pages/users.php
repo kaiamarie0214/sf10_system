@@ -395,9 +395,12 @@ $users = $stmt_users->get_result();
 $subjects = $conn->query("SELECT id, subject_name FROM subjects ORDER BY subject_name");
 
 // Get classes (grade levels and sections) for dropdowns
+// Filter by current school year to avoid duplicates from past years
+$current_school_year = $_SESSION['school_year'] ?? '';
 $classes_query = "SELECT DISTINCT grade_level, section, school_year, status 
                   FROM classes 
                   WHERE status = 'Active' 
+                  AND school_year = '" . $conn->real_escape_string($current_school_year) . "'
                   ORDER BY grade_level, section";
 $classes_result = $conn->query($classes_query);
 $classes_data = [];
