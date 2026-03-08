@@ -9,14 +9,17 @@
  * @param mysqli $conn Database connection
  * @param int $grade_level Grade level (1-6)
  * @param bool $include_mapeh_components Whether to include individual MAPEH components
+ * @param string|null $school_year Optional school year for custom display names
  * @return array Array of subjects
  */
-function getSubjectsByGrade($conn, $grade_level, $include_mapeh_components = true) {
+function getSubjectsByGrade($conn, $grade_level, $include_mapeh_components = true, $school_year = null) {
     // Get subjects for this grade level, using custom display name from subject_grade_groups when set
     $query = "SELECT s.*,
               COALESCE(NULLIF(sgg.subject_name, ''), s.subject_name) AS subject_name
               FROM subjects s
-              LEFT JOIN subject_grade_groups sgg ON sgg.subject_id = s.id AND sgg.grade_level = ?
+              LEFT JOIN subject_grade_groups sgg ON sgg.subject_id = s.id 
+                   AND sgg.grade_level = ? 
+                   AND (sgg.school_year = ? OR (sgg.school_year IS NULL AND ? IS NULL))
               WHERE s.subject_name != 'General Average'
               AND ? BETWEEN COALESCE(s.min_grade, 1) AND COALESCE(s.max_grade, 6)";
     
@@ -27,7 +30,7 @@ function getSubjectsByGrade($conn, $grade_level, $include_mapeh_components = tru
     $query .= " ORDER BY s.display_order, s.subject_name";
     
     $stmt = $conn->prepare($query);
-    $stmt->bind_param("ii", $grade_level, $grade_level);
+    $stmt->bind_param("isii", $grade_level, $school_year, $school_year, $grade_level);
     $stmt->execute();
     $result = $stmt->get_result();
     

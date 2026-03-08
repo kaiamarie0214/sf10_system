@@ -12,6 +12,92 @@ if (!isset($_SESSION['user'])) {
 $user = $_SESSION['user'];
 $is_admin = $user['role'] === 'admin';
 
+// AJAX endpoint for reordering school records
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'reorder_school' && $is_admin) {
+    header('Content-Type: application/json');
+    $input = json_decode(file_get_contents('php://input'), true);
+    $record_id = (int)$input['id'];
+    $direction = $input['direction']; // 'up' or 'down'
+
+    // Get current record info
+    $stmt = $conn->prepare("SELECT student_id, grade_level, school_year, display_order FROM schools_attended WHERE id = ?");
+    $stmt->bind_param("i", $record_id);
+    $stmt->execute();
+    $current = $stmt->get_result()->fetch_assoc();
+
+    if (!$current) {
+        echo json_encode(['success' => false, 'message' => 'Record not found']);
+        exit;
+    }
+
+    $student_id = $current['student_id'];
+    $grade_level = $current['grade_level'];
+    $current_order = $current['display_order'];
+
+    // Fetch all records for this student and grade level, sorted exactly as they appear in the UI
+    $list_stmt = $conn->prepare("SELECT id, display_order FROM schools_attended 
+                                WHERE student_id = ? AND grade_level = ? 
+                                ORDER BY display_order ASC, school_year ASC, id ASC");
+    $list_stmt->bind_param("is", $student_id, $grade_level);
+    $list_stmt->execute();
+    $records = $list_stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    
+    $swap_target = null;
+    $found_idx = -1;
+
+    // Find the current record index in the list
+    foreach ($records as $idx => $rec) {
+        if ($rec['id'] == $record_id) {
+            $found_idx = $idx;
+            break;
+        }
+    }
+
+    // Determine the swap target (the neighbor in the list)
+    if ($found_idx !== -1) {
+        if ($direction === 'up' && $found_idx > 0) {
+            $swap_target = $records[$found_idx - 1];
+        } else if ($direction === 'down' && $found_idx < count($records) - 1) {
+            $swap_target = $records[$found_idx + 1];
+        }
+    }
+
+    if ($swap_target) {
+        $target_id = $swap_target['id'];
+        $target_order = $swap_target['display_order'];
+
+        // If they have the same order value, assign distinct sequential orders
+        // This ensures the next swap works based on order differences
+        if ($target_order == $current_order) {
+            if ($direction === 'up') {
+                $target_order = $current_order - 1;
+            } else {
+                $target_order = $current_order + 1;
+            }
+        }
+
+        $conn->begin_transaction();
+        try {
+            $update1 = $conn->prepare("UPDATE schools_attended SET display_order = ? WHERE id = ?");
+            $update1->bind_param("ii", $target_order, $record_id);
+            $update1->execute();
+
+            $update2 = $conn->prepare("UPDATE schools_attended SET display_order = ? WHERE id = ?");
+            $update2->bind_param("ii", $current_order, $target_id);
+            $update2->execute();
+
+            $conn->commit();
+            echo json_encode(['success' => true]);
+        } catch (Exception $e) {
+            $conn->rollback();
+            echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+        }
+    } else {
+        echo json_encode(['success' => false, 'message' => 'No record to swap with']);
+    }
+    exit;
+}
+
 // Handle Add School Record
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'add' && $is_admin) {
     $student_id = (int)$_POST['student_id'];
@@ -22,23 +108,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     if (!preg_match('/^\d{4}-\d{4}$/', $school_year)) {
         $_SESSION['error_message'] = "Invalid school year format. Use YYYY-YYYY";
     } else {
-        // Check for duplicate record (same student, grade level, and school year)
-        $check_duplicate = $conn->prepare("SELECT id, section FROM schools_attended 
-                                           WHERE student_id = ? AND grade_level = ? AND school_year = ?");
-        $check_duplicate->bind_param("iis", $student_id, $grade_level, $school_year);
-        $check_duplicate->execute();
-        $result = $check_duplicate->get_result();
-        
-        if ($result->num_rows > 0) {
-            $existing = $result->fetch_assoc();
-            $_SESSION['error_message'] = "A school record already exists for this student in Grade {$grade_level} - {$existing['section']} for School Year {$school_year}.";
-        } else {
-            // Insert new school record - always set is_transfer = 1 (transfer) by default
-            $stmt = $conn->prepare("INSERT INTO schools_attended 
-                (student_id, school_name, school_id, district, division, region, grade_level, section, school_year, adviser_name, is_transfer)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)");
+        // Automatically detect if this is an internal school record (regular)
+        // by checking if the adviser name exists in our users table
+        $adviser_name = trim($_POST['adviser_name']);
+        $is_internal = 0;
+        if (!empty($adviser_name)) {
+            $check_user = $conn->prepare("SELECT id FROM users WHERE LOWER(full_name) = LOWER(?) LIMIT 1");
+            $check_user->bind_param("s", $adviser_name);
+            $check_user->execute();
+            if ($check_user->get_result()->num_rows > 0) {
+                $is_internal = 1;
+            }
+        }
+        $is_transfer = ($is_internal === 1) ? 0 : 1;
+
+        // ALLOW multiple records per year for mid-year transfers
+        // Insert new school record
+        $stmt = $conn->prepare("INSERT INTO schools_attended 
+            (student_id, school_name, school_id, district, division, region, grade_level, section, school_year, adviser_name, is_transfer)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             
-            $stmt->bind_param("isssssisss",
+            $stmt->bind_param("isssssisssi",
                 $student_id,
                 $_POST['school_name'],
                 $_POST['school_id'],
@@ -48,7 +138,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 $grade_level,
                 $_POST['section'],
                 $school_year,
-                $_POST['adviser_name']
+                $adviser_name,
+                $is_transfer
             );
             
             if ($stmt->execute()) {
@@ -67,11 +158,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 $_SESSION['error_message'] = "Failed to save school record";
             }
         }
+        
+        header("Location: grade_progression.php?student_id=$student_id");
+        exit();
     }
-    
-    header("Location: grade_progression.php?student_id=$student_id");
-    exit();
-}
 
 // Handle Edit School Record
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'edit' && $is_admin) {
@@ -84,23 +174,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     if (!preg_match('/^\d{4}-\d{4}$/', $school_year)) {
         $_SESSION['error_message'] = "Invalid school year format. Use YYYY-YYYY";
     } else {
-        // Check for duplicate record (excluding current record)
-        $check_duplicate = $conn->prepare("SELECT id, section FROM schools_attended 
-                                           WHERE student_id = ? AND grade_level = ? AND school_year = ? AND id != ?");
-        $check_duplicate->bind_param("iisi", $student_id, $grade_level, $school_year, $record_id);
-        $check_duplicate->execute();
-        $result = $check_duplicate->get_result();
-        
-        if ($result->num_rows > 0) {
-            $existing = $result->fetch_assoc();
-            $_SESSION['error_message'] = "A school record already exists for this student in Grade {$grade_level} - {$existing['section']} for School Year {$school_year}.";
-        } else {
-            $stmt = $conn->prepare("UPDATE schools_attended SET 
-                school_name = ?, school_id = ?, district = ?, division = ?, region = ?,
-                section = ?, school_year = ?, adviser_name = ?
-                WHERE id = ?");
+        // Automatically detect if this is an internal school record (regular)
+        // by checking if the adviser name exists in our users table
+        $adviser_name = trim($_POST['adviser_name']);
+        $is_internal = 0;
+        if (!empty($adviser_name)) {
+            $check_user = $conn->prepare("SELECT id FROM users WHERE LOWER(full_name) = LOWER(?) LIMIT 1");
+            $check_user->bind_param("s", $adviser_name);
+            $check_user->execute();
+            if ($check_user->get_result()->num_rows > 0) {
+                $is_internal = 1;
+            }
+        }
+        $is_transfer = ($is_internal === 1) ? 0 : 1;
+
+        // ALLOW multiple records per year for mid-year transfers
+        $stmt = $conn->prepare("UPDATE schools_attended SET 
+            school_name = ?, school_id = ?, district = ?, division = ?, region = ?,
+            section = ?, school_year = ?, adviser_name = ?, is_transfer = ?
+            WHERE id = ?");
             
-            $stmt->bind_param("ssssssssi",
+            $stmt->bind_param("ssssssssii",
                 $_POST['school_name'],
                 $_POST['school_id'],
                 $_POST['district'],
@@ -108,7 +202,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 $_POST['region'],
                 $_POST['section'],
                 $school_year,
-                $_POST['adviser_name'],
+                $adviser_name,
+                $is_transfer,
                 $record_id
             );
             
@@ -127,7 +222,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             } else {
                 $_SESSION['error_message'] = "Failed to update school record";
             }
-        }
     }
     
     header("Location: grade_progression.php?student_id=$student_id");
@@ -320,7 +414,7 @@ if (!has_teacher_access_to_student($conn, $user['id'], $student_id)) {
 }
 
 // Get all school records for this student
-$stmt = $conn->prepare("SELECT * FROM schools_attended WHERE student_id = ? ORDER BY grade_level ASC, school_year DESC");
+$stmt = $conn->prepare("SELECT * FROM schools_attended WHERE student_id = ? ORDER BY grade_level ASC, display_order ASC, school_year ASC, id ASC");
 $stmt->bind_param("i", $student_id);
 $stmt->execute();
 $records_result = $stmt->get_result();
@@ -417,64 +511,91 @@ include "../templates/header.php";
             <?php if (!empty($grade_records)): ?>
                 <?php foreach ($grade_records as $idx => $record): ?>
                     <div class="p-4 <?= $idx > 0 ? 'border-top border-2' : '' ?>">
-                        <div class="d-flex justify-content-between align-items-center mb-3">
-                            <h5 class="mb-0 text-primary">
-                                <i class="bi bi-calendar3 me-2"></i> School Year: <?= htmlspecialchars($record['school_year'] ?: '-') ?>
-                                <?php if ($record['is_transfer']): ?>
-                                    <span class="badge bg-info ms-2">Transferee</span>
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div class="flex-grow-1">
+                                <div class="d-flex justify-content-between align-items-center mb-3">
+                                    <h5 class="mb-0 text-primary">
+                                        <i class="bi bi-calendar3 me-2"></i> School Year: <?= htmlspecialchars($record['school_year'] ?: '-') ?>
+                                        <?php if ($record['is_transfer']): ?>
+                                            <span class="badge bg-info ms-2">Transferee</span>
+                                        <?php endif; ?>
+                                    </h5>
+                                </div>
+                                
+                                <?php $school_info = getSchoolInfo($conn, $record); ?>
+                                <div class="row mb-3">
+                                    <div class="col-md-3">
+                                        <small class="text-muted d-block">School Name:</small>
+                                        <strong><?= htmlspecialchars($school_info['school_name'] ?: '-') ?></strong>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <small class="text-muted d-block">School ID:</small>
+                                        <strong><?= htmlspecialchars($school_info['school_id'] ?: '-') ?></strong>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <small class="text-muted d-block">Section:</small>
+                                        <strong><?= htmlspecialchars(strtoupper($record['section'] ?: '-')) ?></strong>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <small class="text-muted d-block">District:</small>
+                                        <strong><?= htmlspecialchars($school_info['district'] ?: '-') ?></strong>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <small class="text-muted d-block">Division:</small>
+                                        <strong><?= htmlspecialchars($school_info['division'] ?: '-') ?></strong>
+                                    </div>
+                                </div>
+                                <div class="row mb-3">
+                                    <div class="col-md-3">
+                                        <small class="text-muted d-block">Region:</small>
+                                        <strong><?= htmlspecialchars($school_info['region'] ?: '-') ?></strong>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <small class="text-muted d-block">Adviser:</small>
+                                        <strong><?= htmlspecialchars(strtoupper(getAdviserFullName($conn, $record) ?: '-')) ?></strong>
+                                    </div>
+                                </div>
+                                
+                                <?php if ($is_admin): ?>
+                                <div class="d-flex gap-2 mt-3 align-items-center">
+                                    <button type="button" class="btn btn-sm btn-primary" data-bs-toggle="collapse" data-bs-target="#editForm<?= $record['id'] ?>">
+                                        <i class="bi bi-pencil-square"></i> Edit Details
+                                    </button>
+                                    <a href="enter_grades.php?student_id=<?= $student_id ?>&school_attended_id=<?= $record['id'] ?>" class="btn btn-sm btn-warning">
+                                        <i class="bi bi-clipboard-check"></i> Edit Grades
+                                    </a>
+                                    <a href="?action=delete&id=<?= $record['id'] ?>&student_id=<?= $student_id ?>" 
+                                       class="btn btn-sm btn-danger" 
+                                       onclick="return confirm('Are you sure you want to delete this school record?')">
+                                        <i class="bi bi-trash"></i> Delete
+                                    </a>
+                                </div>
                                 <?php endif; ?>
-                            </h5>
-                        </div>
-                        
-                        <?php $school_info = getSchoolInfo($conn, $record); ?>
-                        <div class="row mb-3">
-                            <div class="col-md-3">
-                                <small class="text-muted d-block">School Name:</small>
-                                <strong><?= htmlspecialchars($school_info['school_name'] ?: '-') ?></strong>
                             </div>
-                            <div class="col-md-2">
-                                <small class="text-muted d-block">School ID:</small>
-                                <strong><?= htmlspecialchars($school_info['school_id'] ?: '-') ?></strong>
+
+                            <?php if ($is_admin && count($grade_records) > 1): ?>
+                            <!-- Reordering Buttons (Up/Down) placed on the right -->
+                            <div class="ms-4 d-flex flex-column gap-2 align-items-center justify-content-center" style="min-width: 100px;">
+                                <div class="text-muted small mb-1 fw-bold">SEQUENCE</div>
+                                <button type="button" class="btn btn-outline-primary reorder-btn-lg" 
+                                        onclick="reorderRecord(<?= $record['id'] ?>, 'up')" 
+                                        title="Move Up"
+                                        <?= $idx === 0 ? 'disabled' : '' ?>>
+                                    <i class="bi bi-chevron-up fs-4"></i>
+                                    <span class="d-block small">MOVE UP</span>
+                                </button>
+                                <button type="button" class="btn btn-outline-primary reorder-btn-lg" 
+                                        onclick="reorderRecord(<?= $record['id'] ?>, 'down')" 
+                                        title="Move Down"
+                                        <?= $idx === count($grade_records) - 1 ? 'disabled' : '' ?>>
+                                    <i class="bi bi-chevron-down fs-4"></i>
+                                    <span class="d-block small">MOVE DOWN</span>
+                                </button>
                             </div>
-                            <div class="col-md-2">
-                                <small class="text-muted d-block">Section:</small>
-                                <strong><?= htmlspecialchars(strtoupper($record['section'] ?: '-')) ?></strong>
-                            </div>
-                            <div class="col-md-2">
-                                <small class="text-muted d-block">District:</small>
-                                <strong><?= htmlspecialchars($school_info['district'] ?: '-') ?></strong>
-                            </div>
-                            <div class="col-md-3">
-                                <small class="text-muted d-block">Division:</small>
-                                <strong><?= htmlspecialchars($school_info['division'] ?: '-') ?></strong>
-                            </div>
-                        </div>
-                        <div class="row mb-3">
-                            <div class="col-md-3">
-                                <small class="text-muted d-block">Region:</small>
-                                <strong><?= htmlspecialchars($school_info['region'] ?: '-') ?></strong>
-                            </div>
-                            <div class="col-md-3">
-                                <small class="text-muted d-block">Adviser:</small>
-                                <strong><?= htmlspecialchars(strtoupper(getAdviserFullName($conn, $record) ?: '-')) ?></strong>
-                            </div>
+                            <?php endif; ?>
                         </div>
                         
                         <?php if ($is_admin): ?>
-                        <div class="d-flex gap-2 mt-3">
-                            <button type="button" class="btn btn-sm btn-primary" data-bs-toggle="collapse" data-bs-target="#editForm<?= $record['id'] ?>">
-                                <i class="bi bi-pencil-square"></i> Edit Details
-                            </button>
-                            <a href="enter_grades.php?student_id=<?= $student_id ?>&school_attended_id=<?= $record['id'] ?>" class="btn btn-sm btn-warning">
-                                <i class="bi bi-clipboard-check"></i> Edit Grades
-                            </a>
-                            <a href="?action=delete&id=<?= $record['id'] ?>&student_id=<?= $student_id ?>" 
-                               class="btn btn-sm btn-danger" 
-                               onclick="return confirm('Are you sure you want to delete this school record?')">
-                                <i class="bi bi-trash"></i> Delete
-                            </a>
-                        </div>
-                        
                         <!-- Edit Record Form (Collapsible) -->
                         <div class="collapse mt-3" id="editForm<?= $record['id'] ?>">
                             <div class="card card-body shadow-sm">
@@ -662,6 +783,33 @@ include "../templates/header.php";
     }
 })();
 
+function reorderRecord(recordId, direction) {
+    if (!confirm(`Are you sure you want to move this record ${direction}?`)) return;
+    
+    const btn = event.currentTarget;
+    btn.disabled = true;
+    
+    fetch(`?ajax=reorder_school&student_id=<?= $student_id ?>`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: recordId, direction: direction })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            window.location.reload();
+        } else {
+            alert('Error reordering record: ' + (data.message || 'Unknown error'));
+            btn.disabled = false;
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert('Failed to reorder record');
+        btn.disabled = false;
+    });
+}
+
 // Auto-dismiss alerts
 document.addEventListener('DOMContentLoaded', function() {
     const alerts = document.querySelectorAll('.alert-dismissible');
@@ -693,6 +841,36 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 
 <style>
+/* Reordering buttons */
+.reorder-btn-lg {
+    width: 80px;
+    height: 60px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 5px;
+    border-width: 2px;
+    transition: all 0.2s;
+}
+
+.reorder-btn-lg:hover:not(:disabled) {
+    background-color: var(--primary-color);
+    color: white;
+    transform: scale(1.05);
+}
+
+.reorder-btn-lg:disabled {
+    opacity: 0.2;
+    cursor: not-allowed;
+    border-color: #dee2e6;
+}
+
+.reorder-btn-lg i {
+    line-height: 1;
+    margin-bottom: 2px;
+}
+
 /* Card styling refinements */
 .card-header {
     padding: 1rem 1.25rem;

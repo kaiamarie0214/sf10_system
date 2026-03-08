@@ -12,6 +12,51 @@ if ($conn->connect_error) {
     die("Connection failed: " . $conn->connect_error);
 }
 
+// Migration: Add display_order to schools_attended if not exists
+$check_col = $conn->query("SHOW COLUMNS FROM schools_attended LIKE 'display_order'");
+if ($check_col && $check_col->num_rows === 0) {
+    $conn->query("ALTER TABLE schools_attended ADD COLUMN display_order INT DEFAULT 0 AFTER is_transfer");
+}
+
+// Migration: Add school_year to subject_grade_groups if not exists
+$check_sy_col = $conn->query("SHOW COLUMNS FROM subject_grade_groups LIKE 'school_year'");
+if ($check_sy_col && $check_sy_col->num_rows === 0) {
+    // Add column
+    $conn->query("ALTER TABLE subject_grade_groups ADD COLUMN school_year VARCHAR(15) DEFAULT NULL AFTER subject_name");
+    
+    // Update existing records to the current active school year as a starting point
+    $active_sy_res = $conn->query("SELECT year FROM school_years WHERE is_active = 1 LIMIT 1");
+    if ($active_sy_res && $active_sy_res->num_rows > 0) {
+        $active_year = $active_sy_res->fetch_assoc()['year'];
+        $conn->query("UPDATE subject_grade_groups SET school_year = '$active_year' WHERE school_year IS NULL");
+    }
+}
+
+// Robust cleanup of old unique indexes that cause sharing across years
+$idx_res = $conn->query("SHOW INDEX FROM subject_grade_groups");
+$old_indexes = [];
+if ($idx_res) {
+    while ($row = $idx_res->fetch_assoc()) {
+        $key_name = $row['Key_name'];
+        if ($key_name === 'PRIMARY') continue;
+        if (!isset($old_indexes[$key_name])) $old_indexes[$key_name] = [];
+        $old_indexes[$key_name][] = $row['Column_name'];
+    }
+    
+    foreach ($old_indexes as $key_name => $columns) {
+        // If index only has subject_id and grade_level, it's an old one that needs to be removed
+        if (count($columns) === 2 && in_array('subject_id', $columns) && in_array('grade_level', $columns)) {
+            $conn->query("ALTER TABLE subject_grade_groups DROP INDEX `$key_name` ");
+        }
+    }
+}
+
+// Add the new unique key that strictly includes school_year
+$check_index = $conn->query("SHOW INDEX FROM subject_grade_groups WHERE Key_name = 'subject_grade_year'");
+if ($check_index && $check_index->num_rows === 0) {
+    $conn->query("ALTER TABLE subject_grade_groups ADD UNIQUE KEY `subject_grade_year` (`subject_id`, `grade_level`, `school_year`) ");
+}
+
 /**
  * Checks if a teacher has access to a specific student
  * @param mysqli $conn Database connection

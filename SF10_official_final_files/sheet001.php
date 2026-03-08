@@ -26,7 +26,7 @@ if (isset($_GET['student_id'])) {
 
    // Fetch ALL school records for a grade level (supports mid-year transfer: multiple records per grade)
    function fetch_all_grade_schools($conn, $student_id, $grade_label, $grade_num) {
-      $stmt = $conn->prepare('SELECT * FROM schools_attended WHERE student_id = ? AND (grade_level = ? OR grade_level = ?) ORDER BY id ASC');
+      $stmt = $conn->prepare('SELECT * FROM schools_attended WHERE student_id = ? AND (grade_level = ? OR grade_level = ?) ORDER BY display_order ASC, school_year ASC, id ASC');
       $stmt->bind_param('iss', $student_id, $grade_label, $grade_num);
       $stmt->execute();
       $result = $stmt->get_result();
@@ -60,11 +60,13 @@ function getSubjectNameForStudent($conn, $subject_id, $student_id, $school_atten
     // First, determine if this is a transfer student
     $is_transfer = false;
     $grade_level_raw = null;
+    $school_year = null;
     
-    $school_info = $conn->query("SELECT grade_level, is_transfer FROM schools_attended WHERE id = $school_attended_id");
+    $school_info = $conn->query("SELECT grade_level, school_year, is_transfer FROM schools_attended WHERE id = $school_attended_id");
     if ($school_info && $school_info->num_rows > 0) {
         $school_data = $school_info->fetch_assoc();
         $grade_level_raw = $school_data['grade_level'];
+        $school_year = $school_data['school_year'];
         $is_transfer = intval($school_data['is_transfer'] ?? 0) === 1;
     }
 
@@ -103,12 +105,15 @@ function getSubjectNameForStudent($conn, $subject_id, $student_id, $school_atten
         $table_check = $conn->query("SHOW TABLES LIKE 'subject_grade_groups'");
         
         if ($table_check && $table_check->num_rows > 0) {
-            $group_query = $conn->query("SELECT subject_name 
-                                         FROM subject_grade_groups 
-                                         WHERE grade_level = $grade_level_num 
-                                         AND subject_id = $subject_id");
-            if ($group_query && $group_query->num_rows > 0) {
-                $group_result = $group_query->fetch_assoc();
+            $group_query = $conn->prepare("SELECT subject_name FROM subject_grade_groups 
+                                          WHERE grade_level = ? AND subject_id = ? 
+                                          AND (school_year = ? OR school_year IS NULL)");
+            $group_query->bind_param("iis", $grade_level_num, $subject_id, $school_year);
+            $group_query->execute();
+            $group_res = $group_query->get_result();
+            
+            if ($group_res && $group_res->num_rows > 0) {
+                $group_result = $group_res->fetch_assoc();
                 // Return the alias name (even if empty) to respect grade-level configuration
                 return $group_result['subject_name'];
             }
@@ -271,7 +276,7 @@ function getSchoolInfo($conn, $school_row) {
 // =============================================================================
 $grades_by_grade = []; // [ grade_num => [ [school=>, grades=>], [school=>, grades=>], ... ] ]
 if (isset($student_id)) {
-   $stmt_sch = $conn->prepare('SELECT * FROM schools_attended WHERE student_id = ? ORDER BY grade_level ASC, id ASC');
+   $stmt_sch = $conn->prepare('SELECT * FROM schools_attended WHERE student_id = ? ORDER BY grade_level ASC, display_order ASC, school_year ASC, id ASC');
    $stmt_sch->bind_param('i', $student_id);
    $stmt_sch->execute();
    $schools_res = $stmt_sch->get_result();
@@ -288,10 +293,18 @@ if (isset($student_id)) {
                        ORDER BY g.subject_id, g.quarter";
 
    while ($school_row = $schools_res->fetch_assoc()) {
-      // Extract numeric grade (e.g., 'Grade 1' -> 1), fallback to school id
+      // Extract numeric grade (e.g., 'Grade 1' -> 1, '1' -> 1)
       $grade_label = $school_row['grade_level'];
-      preg_match('/(\d+)/', $grade_label, $m);
-      $grade_num = isset($m[1]) ? intval($m[1]) : (int)$school_row['id'];
+      $grade_num = 0;
+      if (preg_match('/(\d+)/', $grade_label, $m)) {
+         $grade_num = intval($m[1]);
+      } else {
+         // Fallback for non-numeric grade levels if any
+         $grade_num = (int)$grade_label;
+      }
+      
+      // If still 0, use a high index to put it at the end
+      if ($grade_num <= 0) $grade_num = 99;
 
       if (!isset($grades_by_grade[$grade_num])) {
          $grades_by_grade[$grade_num] = [];

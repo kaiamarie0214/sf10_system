@@ -19,17 +19,26 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'get_grades') {
     $school_attended_id = intval($_GET['school_attended_id']);
     
     try {
-      // Check if school record is for transfer student
-      $columns = $conn->query("SHOW COLUMNS FROM schools_attended LIKE 'is_transfer'");
-      $has_is_transfer = ($columns && $columns->num_rows > 0);
-      if ($has_is_transfer) {
-        $school_info = $conn->prepare("SELECT is_transfer FROM schools_attended WHERE id = ?");
-        $school_info->bind_param("i", $school_attended_id);
-        $school_info->execute();
-        $school_data = $school_info->get_result()->fetch_assoc();
-        $is_transfer = intval($school_data['is_transfer'] ?? 0) === 1;
-      } else {
-        $is_transfer = false;
+      // Check if school record is for transfer student and get school year
+      $school_info = $conn->prepare("SELECT is_transfer, school_year, grade_level FROM schools_attended WHERE id = ?");
+      $school_info->bind_param("i", $school_attended_id);
+      $school_info->execute();
+      $school_data = $school_info->get_result()->fetch_assoc();
+      $is_transfer = intval($school_data['is_transfer'] ?? 0) === 1;
+      $school_year = $school_data['school_year'] ?? null;
+      $grade_level = $school_data['grade_level'] ?? null;
+
+      // Load global subject display names for THIS school year and grade level
+      $subject_grade_names = [];
+      if ($grade_level && $school_year) {
+          $name_query = $conn->prepare("SELECT subject_id, subject_name FROM subject_grade_groups 
+                                       WHERE grade_level = ? AND school_year = ?");
+          $name_query->bind_param("is", $grade_level, $school_year);
+          $name_query->execute();
+          $name_res = $name_query->get_result();
+          while ($nrow = $name_res->fetch_assoc()) {
+              $subject_grade_names[$nrow['subject_id']] = $nrow['subject_name'];
+          }
       }
 
       // Load grades
@@ -104,9 +113,12 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'get_grades') {
       }
 
         echo json_encode([
-            'success' => true, 
-            'grades' => $grades,
-            'is_transfer' => $is_transfer
+            'success' => true,
+            'is_transfer' => $is_transfer,
+            'school_year' => $school_year,
+            'grade_level' => $grade_level,
+            'subject_grade_names' => $subject_grade_names,
+            'grades' => $grades
         ]);
     } catch (Exception $e) {
         echo json_encode(['success' => false, 'message' => 'Error loading grades: ' . $e->getMessage()]);
@@ -635,7 +647,7 @@ function loadGrades() {
     .then(data => {
       console.log('Received data:', data);
       if (data.success) {
-        renderGradesTable(data.grades, schoolAttendedId, data.is_transfer, selectedGrade, data.remedial || []);
+        renderGradesTable(data.grades, schoolAttendedId, data.is_transfer, selectedGrade, data.remedial || [], data.subject_grade_names || {});
       } else {
         container.innerHTML = `<div class="alert alert-danger">${data.message || 'Unknown error'}</div>`;
       }
@@ -646,11 +658,10 @@ function loadGrades() {
     });
 }
 
-function renderGradesTable(grades, schoolAttendedId, isTransfer = false, selectedGrade = '', remedial = []) {
+function renderGradesTable(grades, schoolAttendedId, isTransfer = false, selectedGrade = '', remedial = [], gradeSubjectNames = {}) {
   const subjects = <?= json_encode($subjects) ?>;
   const container = document.getElementById('gradesContainer');
   const studentName = '<?= addslashes($student['fullname']) ?>';
-  const gradeSubjectNames = schoolSubjectsByGrade[String(parseInt(selectedGrade, 10))] || {};
   
   let html = `
     <form method="POST" action="enter_grades.php" id="gradesForm">

@@ -24,9 +24,15 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'save_school_subjects') {
     
     $input = json_decode(file_get_contents('php://input'), true);
     $subjects = $input['subjects'] ?? [];
+    $selected_year = $input['school_year'] ?? null;
     
     if (empty($subjects)) {
         echo json_encode(['success' => false, 'message' => 'No subjects provided']);
+        exit;
+    }
+    
+    if (!$selected_year) {
+        echo json_encode(['success' => false, 'message' => 'School year is required']);
         exit;
     }
     
@@ -42,10 +48,10 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'save_school_subjects') {
         if ($grade_level < 1 || $grade_level > 6) continue;
 
         $stmt = $conn->prepare("INSERT INTO subject_grade_groups 
-                               (grade_level, subject_id, subject_name, display_order)
-                               VALUES (?, ?, ?, 0)
+                               (grade_level, subject_id, subject_name, school_year, display_order)
+                               VALUES (?, ?, ?, ?, 0)
                                ON DUPLICATE KEY UPDATE subject_name = VALUES(subject_name)");
-        $stmt->bind_param("iis", $grade_level, $subject_id, $subject_name);
+        $stmt->bind_param("iiss", $grade_level, $subject_id, $subject_name, $selected_year);
         
         if ($stmt->execute()) {
             $updated++;
@@ -55,7 +61,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'save_school_subjects') {
     if ($updated > 0) {
         // Log the overall activity
         logActivity($conn, $_SESSION['user']['id'], 'UPDATE', 'subject_grade_groups', null, 
-                    "Updated $updated school subject names across Grade levels 1-6");
+                    "Updated $updated school subject names for School Year $selected_year across Grade levels 1-6");
     }
     
     echo json_encode([
@@ -65,16 +71,79 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'save_school_subjects') {
     exit;
 }
 
+// AJAX endpoint for fetching school subjects configuration
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'get_school_subjects') {
+    header('Content-Type: application/json');
+    $school_year = $_GET['school_year'] ?? '';
+    
+    if (!$school_year) {
+        echo json_encode(['success' => false, 'message' => 'School year is required']);
+        exit;
+    }
+
+    $all_subjects = $conn->query("SELECT id, subject_name FROM subjects WHERE subject_name != 'General Average' ORDER BY id");
+    $subjects_by_grade = [];
+
+    for ($grade = 1; $grade <= 6; $grade++) {
+        $subjects_by_grade[$grade] = [];
+        $all_subjects->data_seek(0);
+        
+        while ($subject = $all_subjects->fetch_assoc()) {
+            $stmt = $conn->prepare("SELECT subject_name FROM subject_grade_groups 
+                                   WHERE grade_level = ? AND subject_id = ? AND school_year = ?");
+            $stmt->bind_param("iis", $grade, $subject['id'], $school_year);
+            $stmt->execute();
+            $res = $stmt->get_result();
+            
+            $display_name = $subject['subject_name'];
+            if ($res && $res->num_rows > 0) {
+                $display_name = $res->fetch_assoc()['subject_name'];
+            }
+            
+            $subjects_by_grade[$grade][] = [
+                'subject_id' => $subject['id'],
+                'original_name' => $subject['subject_name'],
+                'subject_name' => $display_name
+            ];
+        }
+    }
+    
+    echo json_encode(['success' => true, 'subjects' => $subjects_by_grade]);
+    exit;
+}
+
 // Set current page for sidebar navigation
 $_SERVER['PHP_SELF'] = 'manage_subjects.php';
 
 include "../templates/header.php";
+
+// Get available school years
+$sy_res = $conn->query("SELECT year FROM school_years ORDER BY year DESC");
+$all_years = [];
+while ($row = $sy_res->fetch_assoc()) {
+    $all_years[] = $row['year'];
+}
+
+// Get active school year from session or database
+$active_year = $_SESSION['school_year'] ?? null;
+if (!$active_year) {
+    $active_sy_res = $conn->query("SELECT year FROM school_years WHERE is_active = 1 LIMIT 1");
+    $active_year = ($active_sy_res && $active_sy_res->num_rows > 0) ? $active_sy_res->fetch_assoc()['year'] : ($all_years[0] ?? date('Y-Y'));
+}
 ?>
 
 <div class="d-flex justify-content-between align-items-start mb-4">
     <div class="page-header mb-0">
         <h2><i class="bi bi-book"></i> Manage School Subject Format</h2>
         <p class="subtitle">Configure default subject names for each grade level</p>
+    </div>
+    <div class="d-flex align-items-center gap-2">
+        <label class="fw-bold mb-0">School Year:</label>
+        <select id="school-year-select" class="form-select" style="width: auto;" onchange="changeSchoolYear()">
+            <?php foreach ($all_years as $sy): ?>
+                <option value="<?= $sy ?>" <?= $sy === $active_year ? 'selected' : '' ?>><?= $sy ?></option>
+            <?php endforeach; ?>
+        </select>
     </div>
 </div>
 
@@ -208,54 +277,13 @@ include "../templates/header.php";
     </div>
 </div>
 
-<?php
-// Check if table exists
-$table_exists = $conn->query("SHOW TABLES LIKE 'subject_grade_groups'")->num_rows > 0;
-
-if (!$table_exists) {
-    echo '<div class="alert alert-danger">Database table subject_grade_groups not found. Please run database migration.</div>';
-    include '../templates/footer.php';
-    exit;
-}
-
-// Get all subjects
-$all_subjects = $conn->query("SELECT id, subject_name FROM subjects WHERE subject_name != 'General Average' ORDER BY id");
-
-// Get subjects for each grade level (1-6)
-$subjects_by_grade = [];
-
-for ($grade = 1; $grade <= 6; $grade++) {
-    $subjects_by_grade[$grade] = [];
-    $all_subjects->data_seek(0); // Reset pointer
-    
-    while ($subject = $all_subjects->fetch_assoc()) {
-        $grade_query = $conn->query("SELECT subject_name FROM subject_grade_groups 
-                                     WHERE grade_level = $grade AND subject_id = {$subject['id']}");
-        
-        $display_name = $subject['subject_name'];
-        if ($grade_query && $grade_query->num_rows > 0) {
-            $grade_data = $grade_query->fetch_assoc();
-            $display_name = $grade_data['subject_name'];
-        }
-        
-        $subjects_by_grade[$grade][] = [
-            'subject_id' => $subject['id'],
-            'original_name' => $subject['subject_name'],
-            'subject_name' => $display_name
-        ];
-    }
-}
-?>
-
 <script>
-const subjectsByGrade = <?= json_encode($subjects_by_grade) ?>;
+let currentSubjectsByGrade = {};
 
 // Load subjects when page loads
 document.addEventListener('DOMContentLoaded', function() {
-    // Load subjects for all grades
-    for (let grade = 1; grade <= 6; grade++) {
-        loadSchoolSubjects(grade);
-    }
+    // Initial load
+    changeSchoolYear();
 
     // Tab persistence logic
     const activeTab = localStorage.getItem('activeSubjectTab');
@@ -276,9 +304,35 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 });
 
-function loadSchoolSubjects(gradeLevel) {
+function changeSchoolYear() {
+    const year = document.getElementById('school-year-select').value;
+    
+    // Show loading state
+    for (let grade = 1; grade <= 6; grade++) {
+        document.getElementById(`subjects-grade-${grade}-list`).innerHTML = '<p class="text-muted">Loading subjects for ' + year + '...</p>';
+    }
+
+    fetch(`?ajax=get_school_subjects&school_year=${encodeURIComponent(year)}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                currentSubjectsByGrade = data.subjects;
+                for (let grade = 1; grade <= 6; grade++) {
+                    renderSchoolSubjects(grade);
+                }
+            } else {
+                alert('Error loading subjects: ' + data.message);
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('Failed to load subjects');
+        });
+}
+
+function renderSchoolSubjects(gradeLevel) {
     const container = document.getElementById(`subjects-grade-${gradeLevel}-list`);
-    const subjects = subjectsByGrade[gradeLevel] || [];
+    const subjects = currentSubjectsByGrade[gradeLevel] || [];
     
     if (subjects.length === 0) {
         container.innerHTML = '<p class="text-muted">No subjects configured for this grade level.</p>';
@@ -318,6 +372,7 @@ function escapeHtml(text) {
 }
 
 function saveSchoolSubjects() {
+    const year = document.getElementById('school-year-select').value;
     const inputs = document.querySelectorAll('.school-subject-input');
     const updates = [];
     
@@ -334,45 +389,40 @@ function saveSchoolSubjects() {
         return;
     }
     
+    const saveBtn = document.querySelector('button[onclick="saveSchoolSubjects()"]');
+    const originalText = saveBtn.innerHTML;
+    saveBtn.disabled = true;
+    saveBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Saving...';
+
     fetch('?ajax=save_school_subjects', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ subjects: updates })
+        body: JSON.stringify({ 
+            subjects: updates,
+            school_year: year
+        })
     })
     .then(response => response.json())
     .then(data => {
+        saveBtn.disabled = false;
+        saveBtn.innerHTML = originalText;
+
         if (data.success) {
-            // Broadcast to all tabs that subject names were updated
-            const updatedGrades = [...new Set(updates.map(u => u.grade_level))];
-            updatedGrades.forEach(gradeLevel => {
-                localStorage.setItem('subjectNamesUpdated', JSON.stringify({
-                    gradeLevel: gradeLevel,
-                    timestamp: new Date().getTime()
-                }));
-                localStorage.removeItem('subjectNamesUpdated');
-            });
-            
-            showSuccessMessage(data.message || 'School subjects updated successfully!');
-            // Reload page after 1.5 seconds
-            setTimeout(() => {
-                window.location.reload();
-            }, 1500);
+            const modal = new bootstrap.Modal(document.getElementById('successModal'));
+            document.getElementById('successModalBody').innerText = data.message;
+            modal.show();
         } else {
-            alert('Error saving subjects: ' + (data.message || 'Unknown error'));
+            alert('Error saving subjects: ' + data.message);
         }
     })
     .catch(error => {
+        saveBtn.disabled = false;
+        saveBtn.innerHTML = originalText;
         console.error('Error:', error);
-        alert('Failed to save school subjects');
+        alert('Failed to save subjects');
     });
-}
-
-function showSuccessMessage(message) {
-    document.getElementById('successModalBody').textContent = message;
-    const modal = new bootstrap.Modal(document.getElementById('successModal'));
-    modal.show();
 }
 </script>
 
@@ -393,3 +443,4 @@ function showSuccessMessage(message) {
 </style>
 
 <?php include '../templates/footer.php'; ?>
+
